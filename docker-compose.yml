@@ -1,0 +1,9 @@
+services:
+  pinktrip:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      PORT: 3000

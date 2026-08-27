@@ -1,0 +1,3 @@
+[
+  {"fromPlaceId":"place-suoingot","toPlaceId":"place-baithung","durationMinutes":25},{"fromPlaceId":"place-baithung","toPlaceId":"place-congvienda","durationMinutes":20},{"fromPlaceId":"place-congvienda","toPlaceId":"place-vinhhybay","durationMinutes":30},{"fromPlaceId":"place-langbiang","toPlaceId":"place-tuyenlam","durationMinutes":35},{"fromPlaceId":"place-tuyenlam","toPlaceId":"place-cafecho","durationMinutes":25},{"fromPlaceId":"place-hoankiem","toPlaceId":"place-phoco","durationMinutes":10},{"fromPlaceId":"place-phoco","toPlaceId":"place-hoalo","durationMinutes":15},{"fromPlaceId":"place-hoankiem","toPlaceId":"place-battrang","durationMinutes":45}
+]

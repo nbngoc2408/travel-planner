@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PinkTrip — Lên kế hoạch theo cách của bạn</title>
+  <meta name="description" content="PinkTrip tự xếp lịch trình du lịch theo sở thích, thời gian và ngân sách của bạn.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E✦%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
+  <header class="topbar"><div class="wrap nav">
+    <a class="brand" href="/" data-route><span class="brand-mark">✦</span> pink<span>trip</span></a>
+    <nav id="primary-nav" class="nav-links" aria-label="Điều hướng chính"></nav>
+    <div id="account-actions" class="account-actions"><button class="text-button" data-action="login">Đăng nhập</button><button class="button button-dark button-small" data-action="register">Tạo tài khoản</button></div>
+    <button class="menu-toggle" type="button" data-action="toggle-menu" aria-expanded="false" aria-controls="mobile-nav"><span></span><span></span><span></span><span class="sr-only">Mở menu</span></button>
+  </div></header>
+  <div id="mobile-nav" class="mobile-nav" aria-hidden="true">
+    <button class="mobile-nav-backdrop" type="button" data-action="close-menu" tabindex="-1" aria-label="Đóng menu"></button>
+    <aside class="mobile-nav-panel" role="dialog" aria-modal="true" aria-label="Menu điều hướng">
+      <div class="mobile-nav-header"><span class="brand"><span class="brand-mark">✦</span> pink<span>trip</span></span><button class="icon-button menu-close" type="button" data-action="close-menu" aria-label="Đóng menu">×</button></div>
+      <nav id="mobile-nav-links" class="mobile-nav-links" aria-label="Điều hướng trên điện thoại"></nav>
+      <div id="mobile-account-actions" class="mobile-account-actions"></div>
+    </aside>
+  </div>
+
+  <main id="top">
+    <div id="landing-content">
+    <section class="hero wrap" id="home-view">
+      <div class="hero-copy"><div class="kicker">TRIP PLANNER · YOUR WAY</div><h1>Đi xa hơn,<br><em>nhẹ nhàng hơn.</em></h1><p>PinkTrip biến những điều bạn thích thành một lịch trình vừa vặn — có điểm đến, khoảng nghỉ và ngân sách rõ ràng.</p><div class="hero-actions"><button class="button button-primary" data-action="new-trip">Bắt đầu lên lịch <span>↗</span></button><a class="button button-ghost" href="#discover">Xem điểm đến <span>↓</span></a></div><div class="hero-proof"><div class="avatar-stack"><span>MA</span><span>Q</span><span>AN</span></div><span>Được yêu thích bởi những người thích đi theo cách riêng</span></div></div>
+      <div class="hero-art"><div class="art-orbit orbit-one"></div><div class="art-orbit orbit-two"></div><div class="postcard"><div class="postcard-top"><span>Vĩnh Hy, Ninh Thuận</span><span>03 — 05.09</span></div><div class="postcard-photo photo-vinh"><span>☼</span></div><div class="postcard-bottom"><div><small>Gợi ý cho bạn</small><strong>3 ngày · biển & thiên nhiên</strong></div><span class="sun-stamp">✦</span></div></div><div class="floating-note note-budget"><span class="note-icon">◌</span><div><small>Ngân sách dự kiến</small><strong>2.85M <i>✓</i></strong></div></div><div class="floating-note note-slow"><span class="note-icon">◒</span><div><small>Nhịp điệu</small><strong>Thảnh thơi</strong></div></div></div>
+    </section>
+
+    <section class="section wrap" id="discover"><div class="section-heading"><div><div class="kicker">ĐI ĐÂU CŨNG ĐƯỢC</div><h2>Những nơi đang gọi tên bạn</h2></div><p>Chọn một nơi để bắt đầu. Phần còn lại, để PinkTrip sắp xếp.</p></div><div id="destination-grid" class="destination-grid"></div></section>
+
+    <section class="how-section" id="how"><div class="wrap"><div class="section-heading light"><div><div class="kicker">MỘT CÁCH ĐI MỚI</div><h2>Ít phải nghĩ hơn.<br>Nhiều thời gian hơn.</h2></div><p>Từ ý tưởng mơ hồ đến lịch trình có thể xách ba lô lên và đi — chỉ trong vài phút.</p></div><div class="how-grid"><article><span>01</span><h3>Chọn điều bạn thích</h3><p>Biển, rừng, café hay món ngon. Bạn chọn cảm hứng, PinkTrip tìm nơi phù hợp.</p></article><article><span>02</span><h3>Để lịch trình tự chảy</h3><p>Điểm đến được xếp theo thời gian đẹp nhất, khoảng cách và nhịp điệu bạn muốn.</p></article><article><span>03</span><h3>Tinh chỉnh theo ý mình</h3><p>Thêm, bớt, đổi thứ tự. Lịch trình là của bạn — luôn có thể thay đổi.</p></article></div></div></section>
+
+    <section class="planner-section wrap" id="planner"><div class="section-heading"><div><div class="kicker">LÊN LỊCH CHUYẾN ĐI</div><h2>Chuyến đi tiếp theo của bạn</h2></div><p id="planner-caption">Một vài lựa chọn nhỏ, một lịch trình thật vừa vặn.</p></div><div id="planner-card" class="planner-card"></div></section>
+
+    <section class="section service-section wrap hidden" id="services-section"><div class="section-heading"><div><div class="kicker">GỢI Ý ĐỊA PHƯƠNG</div><h2>Thêm một chút bản địa</h2></div><p>Những nơi để ăn, nghỉ và dừng chân trên hành trình.</p></div><div id="services-grid" class="services-grid"></div></section>
+
+    <section class="section stories-section" id="stories"><div class="wrap"><div class="section-heading"><div><div class="kicker">CHIA SẺ TỪ NGƯỜI ĐI TRƯỚC</div><h2>Câu chuyện trên đường</h2></div><p>Gợi ý thật từ những người đã đi qua.</p></div><div id="reviews-grid" class="reviews-grid"></div><div id="review-form-wrap" class="review-form-wrap hidden"></div></div></section>
+    </div>
+
+    <section class="app-view section wrap hidden" id="dashboard"><div id="dashboard-content"></div></section>
+    <section class="app-view section wrap hidden" id="trips-view"><div id="trips-content" aria-live="polite"></div></section>
+    <section class="app-view section wrap hidden" id="reviews-view"><div id="reviews-content" aria-live="polite"></div></section>
+  </main>
+  <footer><div class="wrap footer-inner"><a class="brand" href="#top"><span class="brand-mark">✦</span> pink<span>trip</span></a><span>Đi theo cách của bạn · 2026</span><span>Prototype demo · JSON persistence</span></div></footer>
+  <div id="modal-root"></div><div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

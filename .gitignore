@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+.playwright-mcp/
+data/users.json
+data/sessions.json
+data/plans.json
+tmp/

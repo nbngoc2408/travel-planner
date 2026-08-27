@@ -1,0 +1,7 @@
+[
+  {"id":"review-1","destinationId":"dest-vinh-hy","placeId":null,"authorName":"Minh Anh","rating":5,"text":"Suối Nước Ngọt was the calmest part of our trip. The morning slot made the whole day feel easy.","createdAt":"2026-07-18T09:00:00.000Z"},
+  {"id":"review-2","destinationId":"dest-da-lat","placeId":null,"authorName":"Quỳnh","rating":4,"text":"Loved having enough room for cafés and photos instead of rushing from place to place.","createdAt":"2026-07-09T09:00:00.000Z"},
+  {"id":"review-3","destinationId":"dest-vinh-hy","placeId":"place-baichuoi","authorName":"Hà My","rating":5,"text":"Đi sớm thì bãi rất yên, nước trong và có nhiều góc chụp ảnh đẹp.","createdAt":"2026-07-22T09:00:00.000Z"},
+  {"id":"review-4","destinationId":"dest-vinh-hy","placeId":"place-baichuoi","authorName":"Duy","rating":4,"text":"Đẹp và vắng, chỉ cần chuẩn bị nước uống vì quanh bãi ít dịch vụ.","createdAt":"2026-07-28T09:00:00.000Z"},
+  {"id":"review-5","destinationId":"dest-vinh-hy","placeId":"place-baithung","authorName":"Linh","rating":5,"text":"Buổi chiều ở Bãi Thùng rất đáng đi; đá ven bờ lên màu rất đẹp lúc nắng dịu.","createdAt":"2026-08-03T09:00:00.000Z"}
+]
