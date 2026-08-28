@@ -64,6 +64,16 @@ npm test
 
 Tests cover recommendation ranking, itinerary dates/intensity, budget calculations, password verification, JSON repository CRUD, plan ownership, and the complete review HTTP flow.
 
+## Place data and long trips
+
+The seed data uses the existing `Place` shape with a primary `category`, plus compatible `categories`, `area`, and `areaLabel` metadata for discovery and scheduling. It currently contains 137 schedulable places:
+
+- Hà Nội: 45 places across heritage, food, museums, lakes, neighbourhood walks, craft villages, and day excursions.
+- Vĩnh Hy base / nearby Ninh Thuận: 47 places across bays, beaches, villages, vineyards, culture, and clearly labelled excursions.
+- Đà Lạt: 45 places across lakes, falls, forests, cultural sites, cafés, gardens, farms, and day excursions.
+
+Step 2 applies interest filters across all compatible categories, supports a name/area search, preserves selections when filters hide them, and reveals results in small batches. The itinerary generator keeps each place unique, groups a day's stops by `area` when possible, uses an explicit travel-time entry when available, and otherwise uses a deterministic same-area/cross-area demo estimate. It honours the selected list first and keeps each daily schedule inside the demo day window. `test/place-data.test.js` verifies data integrity and 10-day relaxed, balanced, and packed itineraries for all three destinations.
+
 ## Reviews and ratings
 
 A review always belongs to a destination and can optionally belong to one of that destination's places. Omitting `placeId` represents a general destination experience; providing it creates a place-specific review. The server validates that a submitted place exists and belongs to the selected destination, accepts ratings only from 1 to 5, and allows one active review per user for each destination or place target.

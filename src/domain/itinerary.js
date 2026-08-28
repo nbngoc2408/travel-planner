@@ -20,8 +20,19 @@ function parseTime(value) {
   return hours * 60 + minutes;
 }
 
+function sourcePlaceId(source) {
+  return source?.placeId || source?.id;
+}
+
 function travelDuration(previous, current, travelTimes = []) {
-  return previous ? (travelTimes.find((entry) => entry.fromPlaceId === previous.placeId && entry.toPlaceId === current.placeId)?.durationMinutes || 20) : 0;
+  if (!previous || !current) return 0;
+  const fromPlaceId = sourcePlaceId(previous);
+  const toPlaceId = sourcePlaceId(current);
+  const explicit = travelTimes.find((entry) => (entry.fromPlaceId === fromPlaceId && entry.toPlaceId === toPlaceId)
+    || (entry.fromPlaceId === toPlaceId && entry.toPlaceId === fromPlaceId));
+  if (explicit?.durationMinutes) return explicit.durationMinutes;
+  if (previous.area && current.area) return previous.area === current.area ? 12 : 35;
+  return 20;
 }
 
 function settingsFor(intensity = 'balanced') {
@@ -39,40 +50,82 @@ function daysBetween(startDate, endDate) {
   return Math.floor((end - start) / 86400000) + 1;
 }
 
+const TIME_RANK = { morning: 0, any: 1, afternoon: 2, evening: 3 };
+
+function orderDayPlaces(dayPlaces) {
+  return [...dayPlaces].sort((left, right) => (TIME_RANK[left.bestTimeOfDay] ?? 1) - (TIME_RANK[right.bestTimeOfDay] ?? 1)
+    || left.recommendedDurationMinutes - right.recommendedDurationMinutes
+    || String(left.name).localeCompare(String(right.name), 'vi'));
+}
+
+function fitsDay(dayPlaces, settings, travelTimes) {
+  let cursor = settings.start;
+  let previous = null;
+  for (const place of orderDayPlaces(dayPlaces)) {
+    cursor += previous ? travelDuration(previous, place, travelTimes) + settings.gap : 0;
+    cursor += Math.max(30, Number(place.recommendedDurationMinutes) || 120);
+    if (cursor > DAY_END) return false;
+    previous = place;
+  }
+  return true;
+}
+
+function candidateScore(candidate, dayPlaces, remaining) {
+  const sameArea = dayPlaces.length && dayPlaces[0].area && candidate.area === dayPlaces[0].area;
+  const areaCount = remaining.filter((place) => place.area === candidate.area).length;
+  const usedCategories = new Set(dayPlaces.map((place) => place.category));
+  const timeTarget = ['morning', 'any', 'afternoon', 'evening'][Math.min(dayPlaces.length, 3)];
+  return (sameArea ? 20 : dayPlaces.length ? 0 : areaCount * 3)
+    + (!usedCategories.has(candidate.category) ? 4 : 0)
+    + (candidate.bestTimeOfDay === timeTarget ? 3 : candidate.bestTimeOfDay === 'any' ? 1 : 0)
+    + (candidate.hiddenGem ? 1 : 0)
+    - Math.max(0, (Number(candidate.recommendedDurationMinutes) || 120) - 150) / 90;
+}
+
 function generateItinerary({ places = [], startDate, endDate, intensity = 'balanced', travelTimes = [] }) {
   const totalDays = daysBetween(startDate, endDate);
   const settings = settingsFor(intensity);
-  const sorted = [...places].sort((a, b) => {
-    const timeRank = { morning: 0, any: 1, afternoon: 2, evening: 3 };
-    return (timeRank[a.bestTimeOfDay] ?? 1) - (timeRank[b.bestTimeOfDay] ?? 1);
-  });
-  const dayItems = Array.from({ length: totalDays }, () => []);
-  sorted.forEach((place, index) => {
-    if (dayItems[index % totalDays].length < settings.maxStops) dayItems[index % totalDays].push(place);
-  });
-  return dayItems.map((dayPlaces, dayIndex) => {
+  const seenPlaceIds = new Set();
+  const remaining = places.filter((place) => place?.id && !seenPlaceIds.has(place.id) && seenPlaceIds.add(place.id));
+  const days = [];
+
+  for (let dayIndex = 0; dayIndex < totalDays; dayIndex += 1) {
+    const dayPlaces = [];
+    while (dayPlaces.length < settings.maxStops && remaining.length) {
+      const candidates = [...remaining].sort((left, right) => candidateScore(right, dayPlaces, remaining) - candidateScore(left, dayPlaces, remaining)
+        || (left.recommendedDurationMinutes || 120) - (right.recommendedDurationMinutes || 120)
+        || String(left.name).localeCompare(String(right.name), 'vi'));
+      const next = candidates.find((place) => fitsDay([...dayPlaces, place], settings, travelTimes));
+      if (!next) break;
+      dayPlaces.push(next);
+      remaining.splice(remaining.indexOf(next), 1);
+    }
+
     let cursor = settings.start;
-    const items = [];
-    dayPlaces.forEach((place, index) => {
-      const previous = dayPlaces[index - 1];
-      const travel = previous ? (travelTimes.find((entry) => entry.fromPlaceId === previous.id && entry.toPlaceId === place.id)?.durationMinutes || 20) : 0;
-      cursor += travel;
-      const duration = place.recommendedDurationMinutes || 120;
-      items.push({
+    let previous = null;
+    const items = orderDayPlaces(dayPlaces).map((place, index) => {
+      cursor += previous ? travelDuration(previous, place, travelTimes) + settings.gap : 0;
+      const duration = Math.max(30, Number(place.recommendedDurationMinutes) || 120);
+      const item = {
         id: `item-${Date.now()}-${dayIndex}-${index}`,
         placeId: place.id,
         title: place.name,
         category: place.category,
+        area: place.area,
+        areaLabel: place.areaLabel,
         startTime: addMinutes(cursor, 0),
         endTime: addMinutes(cursor, duration),
         durationMinutes: duration,
         estimatedCost: place.estimatedCost || 0,
-        note: place.notes?.[0] || 'Bring water and comfortable shoes.'
-      });
-      cursor += duration + settings.gap;
+        note: place.notes?.[0] || 'Mang theo nước và giày thoải mái.'
+      };
+      cursor += duration;
+      previous = place;
+      return item;
     });
-    return { date: addDate(startDate, dayIndex), items };
-  });
+    days.push({ date: addDate(startDate, dayIndex), items });
+  }
+  return days;
 }
 
 function recalculateItinerary(days = [], { intensity = 'balanced', travelTimes = [] } = {}) {
@@ -198,4 +251,4 @@ function addDate(dateString, offset) {
   return date.toISOString().slice(0, 10);
 }
 
-module.exports = { generateItinerary, daysBetween, recalculateItinerary, moveItineraryItem, replanItinerary, parseTime, addMinutes };
+module.exports = { generateItinerary, daysBetween, recalculateItinerary, moveItineraryItem, replanItinerary, parseTime, addMinutes, travelDuration };

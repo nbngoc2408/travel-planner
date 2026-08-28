@@ -4,16 +4,23 @@ function normalizeCategory(category) {
   return CATEGORY_ALIASES[category] || category;
 }
 
+function categoriesFor(place = {}) {
+  const categories = Array.isArray(place.categories) ? place.categories : [];
+  return [...new Set([...categories, place.category]
+    .filter(Boolean)
+    .map(normalizeCategory))];
+}
+
 function filterPlaces(places, interests = []) {
   const interestSet = new Set(interests.map(normalizeCategory));
   if (!interestSet.size) return [...places];
-  return places.filter((place) => interestSet.has(normalizeCategory(place.category)));
+  return places.filter((place) => categoriesFor(place).some((category) => interestSet.has(category)));
 }
 
 function scorePlace(place, { interests = [], budgetPerStop = Infinity, intensity = 'balanced' } = {}) {
   const interestSet = new Set(interests.map(normalizeCategory));
   let score = 0;
-  if (interestSet.has(normalizeCategory(place.category))) score += 5;
+  if (categoriesFor(place).some((category) => interestSet.has(category))) score += 5;
   if (place.hiddenGem) score += 2;
   if (place.estimatedCost <= budgetPerStop) score += 2;
   if (intensity === 'relaxed' && place.category === 'wellness') score += 2;
@@ -28,4 +35,4 @@ function recommendPlaces(places, config) {
   return ranked.map(({ place }) => place);
 }
 
-module.exports = { recommendPlaces, scorePlace, filterPlaces, normalizeCategory };
+module.exports = { recommendPlaces, scorePlace, filterPlaces, normalizeCategory, categoriesFor };

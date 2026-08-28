@@ -134,6 +134,7 @@ async function buildPlanningResult(input) {
   const selectedIds = Array.isArray(input.selectedPlaceIds) ? input.selectedPlaceIds : [];
   if (!selectedIds.length) throw Object.assign(new Error('Hãy chọn ít nhất một địa điểm để tạo lịch trình'), { status: 400 });
   const selectedPlaces = allPlaces.filter((place) => selectedIds.includes(place.id));
+  if (!selectedPlaces.length) throw Object.assign(new Error('Không tìm thấy địa điểm đã chọn cho điểm đến này'), { status: 400 });
   const days = daysBetween(input.startDate, input.endDate);
   const itinerary = generateItinerary({
     places: selectedPlaces,
@@ -142,8 +143,10 @@ async function buildPlanningResult(input) {
     intensity: input.intensity || 'balanced',
     travelTimes: await store.read('travelTimes', [])
   });
+  const scheduledPlaceIds = new Set(itinerary.flatMap((day) => day.items.map((item) => item.placeId)));
+  const scheduledPlaces = selectedPlaces.filter((place) => scheduledPlaceIds.has(place.id));
   const budget = calculateBudget({
-    places: selectedPlaces,
+    places: scheduledPlaces,
     days,
     travelers: Number(input.travelers) || 1,
     targetBudget: Number(input.targetBudget) || 0,
@@ -154,7 +157,7 @@ async function buildPlanningResult(input) {
     budgetPerStop: budget.total / Math.max(1, selectedPlaces.length || 1),
     intensity: input.intensity
   }).slice(0, 6);
-  return { destination, selectedPlaces, itinerary, budget, recommendations };
+  return { destination, selectedPlaces, scheduledPlaces, itinerary, budget, recommendations };
 }
 
 async function handleApi(req, res, url) {
@@ -308,9 +311,9 @@ async function handleApi(req, res, url) {
     if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
     requireFields(body, ['title', 'destinationId', 'startDate', 'endDate']);
     const generated = await buildPlanningResult(body);
-    const selectedPlaceIds = (body.selectedPlaceIds || []).slice(0, 30);
+    const selectedPlaceIds = (body.selectedPlaceIds || []).filter((id) => generated.selectedPlaces.some((place) => place.id === id));
     const days = Array.isArray(body.days) && body.regenerate === false ? body.days : generated.itinerary;
-    const budget = calculateBudget({ places: generated.selectedPlaces, days: daysBetween(body.startDate, body.endDate), travelers: Number(body.travelers) || 1, targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort' });
+    const budget = calculateBudget({ places: generated.scheduledPlaces, days: daysBetween(body.startDate, body.endDate), travelers: Number(body.travelers) || 1, targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort' });
     const created = await plans.create({ userId: user.id, title: String(body.title).trim().slice(0, 80), destinationId: body.destinationId, startDate: body.startDate, endDate: body.endDate, travelers: Number(body.travelers) || 1, intensity: body.intensity || 'balanced', targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort', interests: body.interests || [], selectedPlaceIds, days, budget, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     json(res, 201, { plan: await relatedPlan(created) }); return;
   }

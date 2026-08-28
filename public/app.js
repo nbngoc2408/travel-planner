@@ -27,6 +27,8 @@ const state = {
   pendingReviewContext: null,
   tripSearch: '',
   tripFilter: 'all',
+  placeSearch: '',
+  placeVisibleCount: 12,
   pendingPath: null,
   replanOpen: false,
   replanDraft: null,
@@ -78,6 +80,12 @@ function place(id) {
 
 function normalizeCategory(category) {
   return ({ photo: 'photography', activity: 'experience' }[category] || category);
+}
+
+function placeCategories(item = {}) {
+  return [...new Set([...(Array.isArray(item.categories) ? item.categories : []), item.category]
+    .filter(Boolean)
+    .map(normalizeCategory))];
 }
 
 function refreshPlans() {
@@ -228,7 +236,7 @@ function renderTripsPage() {
 function readonlyDay(day, index) {
   const items = day.items || [];
   const content = items.length
-    ? items.map((item) => '<div class="timeline-item timeline-item-readonly"><div class="time"><strong>' + escapeHtml(item.startTime) + '</strong><small>đến ' + escapeHtml(item.endTime) + '</small></div><div><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + ' · ' + item.durationMinutes + ' phút · ' + money(item.estimatedCost) + '/người</small></div></div>').join('')
+    ? items.map((item) => '<div class="timeline-item timeline-item-readonly"><div class="time"><strong>' + escapeHtml(item.startTime) + '</strong><small>đến ' + escapeHtml(item.endTime) + '</small></div><div><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + item.durationMinutes + ' phút · ' + money(item.estimatedCost) + '/người</small></div></div>').join('')
     : '<p class="empty-day-message">Chưa có hoạt động nào trong ngày này.</p>';
   return '<section class="timeline-day"><h3>NGÀY ' + (index + 1) + ' · ' + formatDate(day.date) + '</h3>' + content + '</section>';
 }
@@ -547,16 +555,17 @@ async function deleteReview(id) {
 function filteredPlaces() {
   const places = state.places.filter((item) => item.destinationId === state.draft.destinationId);
   const interests = new Set((state.draft.interests || []).map(normalizeCategory));
-  if (!interests.size) return places;
-  return places.filter((item) => interests.has(normalizeCategory(item.category)));
+  const query = state.placeSearch.trim().toLocaleLowerCase('vi-VN');
+  return places.filter((item) => (!interests.size || placeCategories(item).some((category) => interests.has(category)))
+    && (!query || [item.name, item.description, item.areaLabel, item.area].filter(Boolean).join(' ').toLocaleLowerCase('vi-VN').includes(query)));
 }
 
 function pickerCard(item, action = 'toggle-place') {
   const selected = (state.draft.selectedPlaceIds || []).includes(item.id);
-  const label = categoryLabels[item.category] || item.category || 'Điểm dừng';
+  const label = placeCategories(item).map((category) => categoryLabels[category] || category).join(' · ');
   const summary = ratingSummaryFor(item.id);
   const ratingLabel = summary.count ? 'Xem ' + summary.count + ' đánh giá, trung bình ' + Number(summary.average).toFixed(1) + ' sao cho ' + item.name : 'Xem đánh giá cho ' + item.name;
-  return '<article class="picker-card ' + (selected ? 'selected' : '') + '"><button class="picker-select" type="button" data-action="' + action + '" data-id="' + item.id + '" aria-pressed="' + selected + '" aria-label="' + (selected ? 'Bỏ chọn ' : 'Thêm ') + escapeHtml(item.name) + '"><span class="picker-img" style="background-image:url(' + item.image + ')"></span><span class="picker-body"><strong>' + escapeHtml(item.name) + '</strong><span class="picker-description">' + escapeHtml(item.description) + '</span><span class="picker-foot"><span>' + escapeHtml(label) + ' · ' + item.recommendedDurationMinutes + ' phút · ' + money(item.estimatedCost) + '</span><span class="selected-pill">' + (selected ? '✓ Đã chọn' : item.hiddenGem ? 'Hidden gem · Thêm +' : 'Thêm +') + '</span></span></span></button><button class="rating-link" type="button" data-action="open-place-reviews" data-id="' + item.id + '" aria-label="' + escapeHtml(ratingLabel) + '">' + ratingText(summary) + '<span aria-hidden="true">↗</span></button></article>';
+  return '<article class="picker-card ' + (selected ? 'selected' : '') + '"><button class="picker-select" type="button" data-action="' + action + '" data-id="' + item.id + '" aria-pressed="' + selected + '" aria-label="' + (selected ? 'Bỏ chọn ' : 'Thêm ') + escapeHtml(item.name) + '"><span class="picker-img" style="background-image:url(' + item.image + ')"></span><span class="picker-body"><strong>' + escapeHtml(item.name) + '</strong><span class="place-area">' + escapeHtml(item.areaLabel || '') + '</span><span class="picker-description">' + escapeHtml(item.description) + '</span><span class="picker-foot"><span>' + escapeHtml(label) + ' · ' + item.recommendedDurationMinutes + ' phút · ' + money(item.estimatedCost) + '</span><span class="selected-pill">' + (selected ? '✓ Đã chọn' : item.hiddenGem ? 'Hidden gem · Thêm +' : 'Thêm +') + '</span></span></span></button><button class="rating-link" type="button" data-action="open-place-reviews" data-id="' + item.id + '" aria-label="' + escapeHtml(ratingLabel) + '">' + ratingText(summary) + '<span aria-hidden="true">↗</span></button></article>';
 }
 
 function renderStepTwo() {
@@ -564,11 +573,14 @@ function renderStepTwo() {
   const all = state.places.filter((item) => item.destinationId === state.draft.destinationId);
   const selected = all.filter((item) => (state.draft.selectedPlaceIds || []).includes(item.id));
   const interests = [['nature', '🌿', 'Thiên nhiên'], ['beach', '◒', 'Biển'], ['food', '⌁', 'Ẩm thực'], ['culture', '⌂', 'Văn hóa'], ['photography', '⊙', 'Nhiếp ảnh'], ['experience', '✦', 'Trải nghiệm']];
+  const visibleCandidates = candidates.slice(0, state.placeVisibleCount);
   const resultHtml = candidates.length
-    ? candidates.map((item) => pickerCard(item)).join('')
+    ? visibleCandidates.map((item) => pickerCard(item)).join('') + (visibleCandidates.length < candidates.length ? '<div class="place-picker-actions"><button class="button button-ghost" type="button" data-action="load-more-places">Xem thêm ' + Math.min(12, candidates.length - visibleCandidates.length) + ' địa điểm <span>↓</span></button></div>' : '')
     : '<div class="empty-filter-state"><strong>Không tìm thấy địa điểm phù hợp với các sở thích đã chọn.</strong><span>Hãy thử thay đổi hoặc xóa bớt bộ lọc.</span><button class="button button-ghost button-small" data-action="clear-interests">Xóa bộ lọc</button></div>';
-  const selectedSummary = selected.length ? '<div class="selected-summary" aria-live="polite"><strong>' + selected.length + ' địa điểm đã chọn</strong><span>' + escapeHtml(selected.map((item) => item.name).join(' · ')) + '</span></div>' : '<div class="selected-summary is-empty" aria-live="polite"><strong>Chưa chọn địa điểm</strong><span>Chọn ít nhất một nơi để PinkTrip tạo lịch trình.</span></div>';
-  return '<div class="step-panel"><h3>Điều gì làm bạn muốn đi?</h3><p>Chọn sở thích để lọc gợi ý, sau đó chọn những nơi bạn thật sự muốn ghé.</p><div class="choice-grid">' + interests.map(([id, icon, label]) => '<button class="choice ' + ((state.draft.interests || []).map(normalizeCategory).includes(id) ? 'selected' : '') + '" type="button" data-action="toggle-interest" data-interest="' + id + '" aria-pressed="' + ((state.draft.interests || []).map(normalizeCategory).includes(id)) + '"><b aria-hidden="true">' + icon + '</b><small>' + label + '</small></button>').join('') + '</div>' + selectedSummary + '<div class="place-picker"><div class="recommendation-note">Gợi ý cho ' + escapeHtml(destination(state.draft.destinationId)?.name) + ' · ' + candidates.length + '/' + all.length + ' địa điểm đang hiển thị</div>' + resultHtml + '</div></div>';
+  const selectedNames = selected.slice(0, 6).map((item) => item.name);
+  if (selected.length > selectedNames.length) selectedNames.push('và ' + (selected.length - selectedNames.length) + ' địa điểm khác');
+  const selectedSummary = selected.length ? '<div class="selected-summary" aria-live="polite"><strong>' + selected.length + ' địa điểm đã chọn</strong><span>' + escapeHtml(selectedNames.join(' · ')) + '</span></div>' : '<div class="selected-summary is-empty" aria-live="polite"><strong>Chưa chọn địa điểm</strong><span>Chọn ít nhất một nơi để PinkTrip tạo lịch trình.</span></div>';
+  return '<div class="step-panel"><h3>Điều gì làm bạn muốn đi?</h3><p>Chọn sở thích để lọc gợi ý, tìm nhanh theo tên và lưu các nơi bạn thật sự muốn ghé.</p><div class="choice-grid">' + interests.map(([id, icon, label]) => '<button class="choice ' + ((state.draft.interests || []).map(normalizeCategory).includes(id) ? 'selected' : '') + '" type="button" data-action="toggle-interest" data-interest="' + id + '" aria-pressed="' + ((state.draft.interests || []).map(normalizeCategory).includes(id)) + '"><b aria-hidden="true">' + icon + '</b><small>' + label + '</small></button>').join('') + '</div>' + selectedSummary + '<label class="place-search" for="place-search"><span aria-hidden="true">⌕</span><span class="sr-only">Tìm địa điểm</span><input id="place-search" type="search" data-place-search value="' + escapeHtml(state.placeSearch) + '" placeholder="Tìm theo tên hoặc khu vực"></label><div class="place-picker"><div class="recommendation-note">' + candidates.length + ' / ' + all.length + ' địa điểm phù hợp tại ' + escapeHtml(destination(state.draft.destinationId)?.name) + '</div>' + resultHtml + '</div></div>';
 }
 
 function timeToMinutes(value) {
@@ -589,7 +601,7 @@ function editorDay(day, dayIndex) {
   const items = day.items || [];
   const itemHtml = items.map((item, index) => {
     const dayOptions = (state.generated?.itinerary || []).map((entry, targetIndex) => '<option value="' + targetIndex + '" ' + (targetIndex === dayIndex ? 'selected' : '') + '>Ngày ' + (targetIndex + 1) + '</option>').join('');
-    return '<div class="timeline-item editable-item" data-day="' + dayIndex + '" data-index="' + index + '"><div class="time"><input class="inline-input" type="time" data-item-field="startTime" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + escapeHtml(item.startTime) + '" aria-label="Giờ bắt đầu ' + escapeHtml(item.title) + '"><small>đến ' + escapeHtml(item.endTime) + '</small></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + ' · ' + money(item.estimatedCost) + '/người</small><label class="duration-control">Thời lượng <input class="duration-input" type="number" min="30" step="15" data-item-field="durationMinutes" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + item.durationMinutes + '" aria-label="Thời lượng ' + escapeHtml(item.title) + '"> phút</label></div><div class="timeline-controls"><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="up" aria-label="Đưa ' + escapeHtml(item.title) + ' lên">↑</button><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="down" aria-label="Đưa ' + escapeHtml(item.title) + ' xuống">↓</button><select class="move-select" data-action="move-item-to-day" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Di chuyển ' + escapeHtml(item.title) + ' sang ngày khác"><option value="">Di chuyển đến…</option>' + dayOptions + '</select><button class="icon-button danger-icon" type="button" data-action="remove-item" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Xóa ' + escapeHtml(item.title) + '">×</button></div></div>';
+    return '<div class="timeline-item editable-item" data-day="' + dayIndex + '" data-index="' + index + '"><div class="time"><input class="inline-input" type="time" data-item-field="startTime" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + escapeHtml(item.startTime) + '" aria-label="Giờ bắt đầu ' + escapeHtml(item.title) + '"><small>đến ' + escapeHtml(item.endTime) + '</small></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + money(item.estimatedCost) + '/người</small><label class="duration-control">Thời lượng <input class="duration-input" type="number" min="30" step="15" data-item-field="durationMinutes" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + item.durationMinutes + '" aria-label="Thời lượng ' + escapeHtml(item.title) + '"> phút</label></div><div class="timeline-controls"><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="up" aria-label="Đưa ' + escapeHtml(item.title) + ' lên">↑</button><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="down" aria-label="Đưa ' + escapeHtml(item.title) + ' xuống">↓</button><select class="move-select" data-action="move-item-to-day" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Di chuyển ' + escapeHtml(item.title) + ' sang ngày khác"><option value="">Di chuyển đến…</option>' + dayOptions + '</select><button class="icon-button" type="button" data-action="remove-item" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Xóa ' + escapeHtml(item.title) + '">×</button></div></div>';
   }).join('');
   return '<section class="timeline-day editable-day" data-drop-day="' + dayIndex + '"><h4>NGÀY ' + (dayIndex + 1) + ' · ' + formatDate(day.date) + '</h4>' + (itemHtml || '<p class="empty-day-message">Chưa có hoạt động nào trong ngày này. Bạn vẫn có thể chuyển điểm dừng vào đây.</p>') + '</section>';
 }
@@ -682,6 +694,8 @@ function loadPlanIntoEditor(plan) {
   state.draft = { title: plan.title, destinationId: plan.destinationId, startDate: plan.startDate, endDate: plan.endDate, travelers: plan.travelers, targetBudget: plan.targetBudget, accommodationLevel: plan.accommodationLevel || 'comfort', intensity: plan.intensity || 'balanced', interests: plan.interests || [], selectedPlaceIds: plan.selectedPlaceIds || [] };
   state.generated = { destination: plan.destination, itinerary: clone(plan.days || []), budget: clone(plan.budget || {}) };
   state.generatedSignature = draftSignature();
+  state.placeSearch = '';
+  state.placeVisibleCount = 12;
 }
 
 async function applyRoute({ scroll = true } = {}) {
@@ -764,6 +778,8 @@ function startNewTrip(id) {
   state.generated = null;
   state.generatedSignature = null;
   state.draft = defaultDraft(id);
+  state.placeSearch = '';
+  state.placeVisibleCount = 12;
   navigate('/trips/new', { scroll: false });
   requestAnimationFrame(() => $('#planner').scrollIntoView({ behavior: 'smooth' }));
 }
@@ -971,10 +987,16 @@ async function handleAction(target) {
   if (action === 'toggle-interest') {
     const id = normalizeCategory(target.dataset.interest);
     state.draft.interests = state.draft.interests.includes(id) ? state.draft.interests.filter((item) => normalizeCategory(item) !== id) : [...state.draft.interests, id];
+    state.placeVisibleCount = 12;
     return renderPlanner();
   }
   if (action === 'clear-interests') {
     state.draft.interests = [];
+    state.placeVisibleCount = 12;
+    return renderPlanner();
+  }
+  if (action === 'load-more-places') {
+    state.placeVisibleCount += 12;
     return renderPlanner();
   }
   if (action === 'toggle-place' || action === 'add-stop') {
@@ -1057,6 +1079,17 @@ document.addEventListener('input', (event) => {
     state.tripSearch = target.value;
     return renderTripsPage();
   }
+  if (target.dataset.placeSearch !== undefined) {
+    const caret = target.selectionStart;
+    state.placeSearch = target.value;
+    state.placeVisibleCount = 12;
+    renderPlanner();
+    return requestAnimationFrame(() => {
+      const input = $('#place-search');
+      input?.focus();
+      if (input && Number.isInteger(caret)) input.setSelectionRange(caret, caret);
+    });
+  }
   const field = target.dataset.draft;
   if (field) state.draft[field] = target.type === 'number' ? Number(target.value) : target.value;
   const reviewField = target.dataset.reviewField;
@@ -1085,7 +1118,11 @@ document.addEventListener('change', (event) => {
   const field = target.dataset.draft;
   if (field) {
     state.draft[field] = target.type === 'number' ? Number(target.value) : target.value;
-    if (field === 'destinationId') state.draft.selectedPlaceIds = [];
+    if (field === 'destinationId') {
+      state.draft.selectedPlaceIds = [];
+      state.placeSearch = '';
+      state.placeVisibleCount = 12;
+    }
   }
   const reviewField = target.dataset.reviewField;
   if (reviewField) {
