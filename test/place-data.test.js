@@ -12,7 +12,7 @@ const places = require(path.join(ROOT, 'data/seed/places.json'));
 const travelTimes = require(path.join(ROOT, 'data/seed/travelTimes.json'));
 const VALID_CATEGORIES = new Set(['nature', 'beach', 'food', 'culture', 'photography', 'experience']);
 const VALID_TIMES = new Set(['morning', 'afternoon', 'evening', 'any']);
-const EXPECTED_COUNTS = { 'dest-hanoi': 45, 'dest-vinh-hy': 47, 'dest-da-lat': 45 };
+const EXPECTED_COUNTS = { 'dest-hanoi': 45, 'dest-vinh-hy': 47, 'dest-da-lat': 47 };
 
 function categoriesFor(place) {
   return new Set([place.category, ...(place.categories || [])]);
@@ -32,6 +32,7 @@ test('expanded place seed uses the compatible model with complete scheduling met
     assert.ok(place.id && !ids.has(place.id), `unique id required for ${place.name}`);
     ids.add(place.id);
     assert.ok(destinationIds.has(place.destinationId), `${place.id} has a valid destination`);
+    assert.equal(Object.hasOwn(place, 'hiddenGem'), false, `${place.id} does not retain removed presentation metadata`);
     assert.ok(place.name && place.description && place.image, `${place.id} has display metadata`);
     const nameKey = `${place.destinationId}:${place.name.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLocaleLowerCase('vi-VN')}`;
     assert.ok(!names.has(nameKey), `duplicate attraction name: ${place.name}`);

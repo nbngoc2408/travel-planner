@@ -9,6 +9,7 @@ const { recommendPlaces } = require('./domain/recommendations');
 const { summarizeRatings, ratingDistribution, getPlaceRatingSummaries, getDestinationRatingSummaries } = require('./domain/ratings');
 const { calculateBudget } = require('./domain/budget');
 const { generateItinerary, daysBetween, recalculateItinerary, replanItinerary } = require('./domain/itinerary');
+const { resolveInspirationLink } = require('./domain/inspiration');
 
 const ROOT = path.join(__dirname, '..');
 const DATA_DIR = process.env.PINKTRIP_DATA_DIR || path.join(ROOT, 'data');
@@ -21,6 +22,7 @@ const destinations = new CollectionRepository(store, 'destinations');
 const places = new CollectionRepository(store, 'places');
 const services = new CollectionRepository(store, 'services');
 const reviews = new ReviewRepository(store, 'reviews');
+const inspirationLinks = new CollectionRepository(store, 'inspiration-links');
 
 async function ensureDataFiles() {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -130,8 +132,19 @@ async function buildPlanningResult(input) {
   requireFields(input, ['destinationId', 'startDate', 'endDate']);
   const destination = await destinations.findById(input.destinationId);
   if (!destination) throw Object.assign(new Error('Destination not found'), { status: 404 });
-  const allPlaces = (await places.all()).filter((place) => place.destinationId === destination.id);
-  const selectedIds = Array.isArray(input.selectedPlaceIds) ? input.selectedPlaceIds : [];
+  const allKnownPlaces = await places.all();
+  const allPlaces = allKnownPlaces.filter((place) => place.destinationId === destination.id);
+  const mappings = await inspirationLinks.all();
+  const suppliedItems = Array.isArray(input.inspirationItems) ? input.inspirationItems : [];
+  const inspirationItems = [];
+  for (const item of suppliedItems) {
+    const match = resolveInspirationLink(item?.sourceUrl || item?.canonicalUrl, mappings, allKnownPlaces);
+    if (match.status !== 'matched' || match.place.destinationId !== destination.id) continue;
+    if (!inspirationItems.some((saved) => saved.placeId === match.place.id)) {
+      inspirationItems.push({ mappingId: match.mapping.id, placeId: match.place.id, sourceUrl: match.normalizedUrl, platform: match.mapping.platform });
+    }
+  }
+  const selectedIds = [...new Set([...(Array.isArray(input.selectedPlaceIds) ? input.selectedPlaceIds : []), ...inspirationItems.map((item) => item.placeId)])];
   if (!selectedIds.length) throw Object.assign(new Error('Hãy chọn ít nhất một địa điểm để tạo lịch trình'), { status: 400 });
   const selectedPlaces = allPlaces.filter((place) => selectedIds.includes(place.id));
   if (!selectedPlaces.length) throw Object.assign(new Error('Không tìm thấy địa điểm đã chọn cho điểm đến này'), { status: 400 });
@@ -157,7 +170,7 @@ async function buildPlanningResult(input) {
     budgetPerStop: budget.total / Math.max(1, selectedPlaces.length || 1),
     intensity: input.intensity
   }).slice(0, 6);
-  return { destination, selectedPlaces, scheduledPlaces, itinerary, budget, recommendations };
+  return { destination, selectedPlaces, scheduledPlaces, itinerary, budget, recommendations, inspirationItems };
 }
 
 async function handleApi(req, res, url) {
@@ -207,6 +220,26 @@ async function handleApi(req, res, url) {
     const allPlaces = await places.all();
     const filteredPlaces = allPlaces.filter((place) => !url.searchParams.get('destinationId') || place.destinationId === url.searchParams.get('destinationId'));
     json(res, 200, { places: filteredPlaces, ratingSummaries: getPlaceRatingSummaries(await reviews.all(), filteredPlaces.map((item) => item.id)) }); return;
+  }
+  if (method === 'POST' && pathname === '/api/inspiration/resolve') {
+    if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
+    const match = resolveInspirationLink(body.url, await inspirationLinks.all(), await places.all());
+    if (match.status === 'invalid') throw Object.assign(new Error('Vui lòng dán một đường link hợp lệ.'), { status: 400 });
+    if (match.status === 'unsupported') { json(res, 200, { status: 'unsupported' }); return; }
+    if (match.status === 'unavailable') {
+      json(res, 200, { status: 'unavailable', mapping: { id: match.mapping.id, platform: match.mapping.platform }, resolved: match.mapping.resolved });
+      return;
+    }
+    const targetDestination = await destinations.findById(match.place.destinationId);
+    const currentDestinationId = body.destinationId ? String(body.destinationId) : '';
+    json(res, 200, {
+      status: currentDestinationId && currentDestinationId !== match.place.destinationId ? 'mismatch' : 'matched',
+      mapping: { id: match.mapping.id, platform: match.mapping.platform, canonicalUrl: match.mapping.url },
+      place: match.place,
+      destination: targetDestination,
+      normalizedUrl: match.normalizedUrl
+    });
+    return;
   }
   if (method === 'GET' && pathname === '/api/services') { json(res, 200, { services: (await services.all()).filter((service) => !url.searchParams.get('destinationId') || service.destinationId === url.searchParams.get('destinationId')) }); return; }
   if (method === 'GET' && pathname === '/api/reviews') {
@@ -264,8 +297,8 @@ async function handleApi(req, res, url) {
     const itinerary = Array.isArray(body.itinerary) ? body.itinerary : [];
     const recalculated = recalculateItinerary(itinerary, { intensity: body.intensity || 'balanced', travelTimes: await store.read('travelTimes', []) });
     const allPlaces = await places.all();
-    const selectedIds = Array.isArray(body.selectedPlaceIds) ? body.selectedPlaceIds : [];
-    const budget = calculateBudget({ places: allPlaces.filter((place) => selectedIds.includes(place.id)), days: daysBetween(body.startDate, body.endDate), travelers: Number(body.travelers) || 1, targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort' });
+    const itineraryPlaceIds = new Set(recalculated.flatMap((day) => day.items.map((item) => item.placeId)).filter(Boolean));
+    const budget = calculateBudget({ places: allPlaces.filter((place) => itineraryPlaceIds.has(place.id)), days: daysBetween(body.startDate, body.endDate), travelers: Number(body.travelers) || 1, targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort' });
     json(res, 200, { itinerary: recalculated, budget }); return;
   }
 
@@ -278,9 +311,9 @@ async function handleApi(req, res, url) {
     const result = replanItinerary({ days: itinerary, disruption: body.disruption || {}, intensity: body.intensity || 'balanced', travelTimes: await store.read('travelTimes', []) });
     const allPlaces = await places.all();
     const itemPlaceIds = new Set(result.days.flatMap((day) => day.items.map((item) => item.placeId)).filter(Boolean));
-    const selectedIds = (Array.isArray(body.selectedPlaceIds) ? body.selectedPlaceIds : []).filter((id) => itemPlaceIds.has(id));
-    const budget = calculateBudget({ places: allPlaces.filter((place) => selectedIds.includes(place.id)), days: daysBetween(body.startDate, body.endDate), travelers: Number(body.travelers) || 1, targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort' });
-    json(res, 200, { ...result, budget, selectedPlaceIds: selectedIds }); return;
+    const selectedPlaceIds = Array.isArray(body.selectedPlaceIds) ? [...new Set(body.selectedPlaceIds)] : [];
+    const budget = calculateBudget({ places: allPlaces.filter((place) => itemPlaceIds.has(place.id)), days: daysBetween(body.startDate, body.endDate), travelers: Number(body.travelers) || 1, targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort' });
+    json(res, 200, { ...result, budget, selectedPlaceIds }); return;
   }
 
   const planMatch = pathname.match(/^\/api\/plans\/([^/]+)$/);
@@ -293,13 +326,16 @@ async function handleApi(req, res, url) {
     if (method === 'DELETE') { await plans.delete(planId); json(res, 200, { ok: true }); return; }
     if (method === 'PUT') {
       const next = { ...existing, ...body, userId: user.id, id: existing.id, updatedAt: new Date().toISOString() };
+      const validated = await buildPlanningResult(next);
+      next.selectedPlaceIds = validated.selectedPlaces.map((place) => place.id);
+      next.inspirationItems = validated.inspirationItems;
       if (body.regenerate !== false) {
-        const generated = await buildPlanningResult(next);
-        next.days = generated.itinerary;
-        next.budget = generated.budget;
+        next.days = validated.itinerary;
+        next.budget = validated.budget;
       } else if (Array.isArray(body.days)) {
         const allPlaces = await places.all();
-        next.budget = calculateBudget({ places: allPlaces.filter((place) => (next.selectedPlaceIds || []).includes(place.id)), days: daysBetween(next.startDate, next.endDate), travelers: Number(next.travelers) || 1, targetBudget: Number(next.targetBudget) || 0, accommodationLevel: next.accommodationLevel || 'comfort' });
+        const itineraryPlaceIds = new Set(body.days.flatMap((day) => (day.items || []).map((item) => item.placeId)).filter(Boolean));
+        next.budget = calculateBudget({ places: allPlaces.filter((place) => itineraryPlaceIds.has(place.id)), days: daysBetween(next.startDate, next.endDate), travelers: Number(next.travelers) || 1, targetBudget: Number(next.targetBudget) || 0, accommodationLevel: next.accommodationLevel || 'comfort' });
       }
       delete next.regenerate;
       const saved = await plans.update(planId, next);
@@ -311,10 +347,11 @@ async function handleApi(req, res, url) {
     if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
     requireFields(body, ['title', 'destinationId', 'startDate', 'endDate']);
     const generated = await buildPlanningResult(body);
-    const selectedPlaceIds = (body.selectedPlaceIds || []).filter((id) => generated.selectedPlaces.some((place) => place.id === id));
+    const selectedPlaceIds = generated.selectedPlaces.map((place) => place.id);
     const days = Array.isArray(body.days) && body.regenerate === false ? body.days : generated.itinerary;
-    const budget = calculateBudget({ places: generated.scheduledPlaces, days: daysBetween(body.startDate, body.endDate), travelers: Number(body.travelers) || 1, targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort' });
-    const created = await plans.create({ userId: user.id, title: String(body.title).trim().slice(0, 80), destinationId: body.destinationId, startDate: body.startDate, endDate: body.endDate, travelers: Number(body.travelers) || 1, intensity: body.intensity || 'balanced', targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort', interests: body.interests || [], selectedPlaceIds, days, budget, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    const itineraryPlaceIds = new Set(days.flatMap((day) => (day.items || []).map((item) => item.placeId)).filter(Boolean));
+    const budget = calculateBudget({ places: generated.selectedPlaces.filter((place) => itineraryPlaceIds.has(place.id)), days: daysBetween(body.startDate, body.endDate), travelers: Number(body.travelers) || 1, targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort' });
+    const created = await plans.create({ userId: user.id, title: String(body.title).trim().slice(0, 80), destinationId: body.destinationId, startDate: body.startDate, endDate: body.endDate, travelers: Number(body.travelers) || 1, intensity: body.intensity || 'balanced', targetBudget: Number(body.targetBudget) || 0, accommodationLevel: body.accommodationLevel || 'comfort', interests: body.interests || [], selectedPlaceIds, inspirationItems: generated.inspirationItems, days, budget, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     json(res, 201, { plan: await relatedPlan(created) }); return;
   }
 

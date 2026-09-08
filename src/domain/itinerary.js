@@ -78,7 +78,6 @@ function candidateScore(candidate, dayPlaces, remaining) {
   return (sameArea ? 20 : dayPlaces.length ? 0 : areaCount * 3)
     + (!usedCategories.has(candidate.category) ? 4 : 0)
     + (candidate.bestTimeOfDay === timeTarget ? 3 : candidate.bestTimeOfDay === 'any' ? 1 : 0)
-    + (candidate.hiddenGem ? 1 : 0)
     - Math.max(0, (Number(candidate.recommendedDurationMinutes) || 120) - 150) / 90;
 }
 

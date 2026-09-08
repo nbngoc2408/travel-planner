@@ -7,10 +7,10 @@ const { generateItinerary, moveItineraryItem, replanItinerary } = require('../sr
 const { hashPassword, verifyPassword } = require('../src/infrastructure/auth');
 
 const places = [
-  { id: 'beach', name: 'Bãi biển', category: 'beach', hiddenGem: false, estimatedCost: 100000, recommendedDurationMinutes: 120, bestTimeOfDay: 'afternoon' },
-  { id: 'nature', name: 'Suối', category: 'nature', hiddenGem: true, estimatedCost: 50000, recommendedDurationMinutes: 90, bestTimeOfDay: 'morning' },
-  { id: 'food', name: 'Chợ', category: 'food', hiddenGem: false, estimatedCost: 180000, recommendedDurationMinutes: 60, bestTimeOfDay: 'evening' },
-  { id: 'photo', name: 'Đồi ảnh', category: 'photography', hiddenGem: false, estimatedCost: 70000, recommendedDurationMinutes: 90, bestTimeOfDay: 'afternoon' }
+  { id: 'beach', name: 'Bãi biển', category: 'beach', estimatedCost: 100000, recommendedDurationMinutes: 120, bestTimeOfDay: 'afternoon' },
+  { id: 'nature', name: 'Suối', category: 'nature', estimatedCost: 50000, recommendedDurationMinutes: 90, bestTimeOfDay: 'morning' },
+  { id: 'food', name: 'Chợ', category: 'food', estimatedCost: 180000, recommendedDurationMinutes: 60, bestTimeOfDay: 'evening' },
+  { id: 'photo', name: 'Đồi ảnh', category: 'photography', estimatedCost: 70000, recommendedDurationMinutes: 90, bestTimeOfDay: 'afternoon' }
 ];
 
 test('interest filtering uses all places with no filter and OR semantics for multiple interests', () => {
@@ -19,7 +19,7 @@ test('interest filtering uses all places with no filter and OR semantics for mul
   assert.deepEqual(filterPlaces(places, ['nature', 'beach']).map((place) => place.id), ['beach', 'nature']);
 });
 
-test('recommendations prioritize selected interests and hidden gems', () => {
+test('recommendations prioritize selected interests and budget fit', () => {
   const result = recommendPlaces(places, { interests: ['nature'], budgetPerStop: 100000 });
   assert.equal(result[0].id, 'nature');
 });

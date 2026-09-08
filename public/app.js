@@ -16,6 +16,7 @@ const state = {
   step: 0,
   draft: {},
   generated: null,
+  itineraryBaseline: null,
   generatedSignature: null,
   editingPlanId: null,
   reviewRating: 5,
@@ -33,6 +34,11 @@ const state = {
   replanOpen: false,
   replanDraft: null,
   replanPreview: null,
+  resetConfirmOpen: false,
+  inspirationResolution: null,
+  inspirationInput: '',
+  itineraryView: 'detailed',
+  activeItineraryDay: 0,
   toastTimer: null
 };
 
@@ -46,6 +52,9 @@ const categoryLabels = { nature: 'Thiên nhiên', beach: 'Biển', food: 'Ẩm t
 let lastMenuTrigger = null;
 let lastAuthTrigger = null;
 let lastModalTrigger = null;
+let itineraryScrollFrame = null;
+let itineraryNormalizeTimer = null;
+let itineraryMutationVersion = 0;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -67,7 +76,11 @@ function toast(message) {
 }
 
 function clone(value) {
-  return JSON.parse(JSON.stringify(value));
+  return window.PinkTripItineraryState.clone(value);
+}
+
+function establishItineraryBaseline({ itinerary = state.generated?.itinerary, budget = state.generated?.budget } = {}) {
+  state.itineraryBaseline = window.PinkTripItineraryState.createBaseline({ itinerary, budget });
 }
 
 function destination(id) {
@@ -119,12 +132,14 @@ function defaultDraft(destinationId = state.destinations[0]?.id) {
     accommodationLevel: 'comfort',
     intensity: 'balanced',
     interests: ['nature', 'beach'],
-    selectedPlaceIds: []
+    selectedPlaceIds: [],
+    stepTwoPlaceIds: [],
+    inspirationItems: []
   };
 }
 
 function draftSignature() {
-  return JSON.stringify({ destinationId: state.draft.destinationId, startDate: state.draft.startDate, endDate: state.draft.endDate, intensity: state.draft.intensity, selectedPlaceIds: [...(state.draft.selectedPlaceIds || [])].sort() });
+  return JSON.stringify({ destinationId: state.draft.destinationId, startDate: state.draft.startDate, endDate: state.draft.endDate, intensity: state.draft.intensity, selectedPlaceIds: [...(state.draft.selectedPlaceIds || [])].sort(), inspirationItems: (state.draft.inspirationItems || []).map((item) => item.mappingId).sort() });
 }
 
 function parseRoute(path = window.location.pathname, search = window.location.search) {
@@ -233,12 +248,25 @@ function renderTripsPage() {
   target.innerHTML = html;
 }
 
-function readonlyDay(day, index) {
+function timelineGap(item, nextItem) {
+  const minutes = nextItem ? Math.max(0, timeToMinutes(nextItem.startTime) - timeToMinutes(item.endTime)) : 0;
+  return minutes ? '<p class="timeline-gap"><span aria-hidden="true">↓</span> Khoảng chuyển tiếp ' + minutes + ' phút</p>' : '';
+}
+
+function timelineTime(item, { editable = false, dayIndex = 0 } = {}) {
+  const start = editable
+    ? '<input class="inline-input" type="text" inputmode="numeric" pattern="([01]\\d|2[0-3]):[0-5]\\d" data-item-field="startTime" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + escapeHtml(item.startTime) + '" aria-label="Giờ bắt đầu ' + escapeHtml(item.title) + '">'
+    : '<time datetime="' + escapeHtml(item.startTime) + '"><strong>' + escapeHtml(item.startTime) + '</strong></time>';
+  return '<div class="timeline-time">' + start + '<span>đến ' + escapeHtml(item.endTime) + '</span></div>';
+}
+
+function readonlyDay(day, index, protectedItemIds = new Set(), workspace = '') {
   const items = day.items || [];
+  const protectedIds = protectedItemIds instanceof Set ? protectedItemIds : new Set();
   const content = items.length
-    ? items.map((item) => '<div class="timeline-item timeline-item-readonly"><div class="time"><strong>' + escapeHtml(item.startTime) + '</strong><small>đến ' + escapeHtml(item.endTime) + '</small></div><div><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + item.durationMinutes + ' phút · ' + money(item.estimatedCost) + '/người</small></div></div>').join('')
+    ? items.map((item, itemIndex) => '<div class="timeline-item timeline-item-readonly' + (protectedIds.has(item.id) ? ' timeline-item-protected' : '') + (itemIndex < items.length - 1 ? ' has-next' : '') + '">' + timelineTime(item) + '<div class="timeline-rail" aria-hidden="true"><span></span></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + item.durationMinutes + ' phút · ' + money(item.estimatedCost) + '/người</small>' + (protectedIds.has(item.id) ? '<span class="timeline-item-status">Đã hoàn thành · giữ nguyên</span>' : '') + '</div>' + timelineGap(item, items[itemIndex + 1]) + '</div>').join('')
     : '<p class="empty-day-message">Chưa có hoạt động nào trong ngày này.</p>';
-  return '<section class="timeline-day"><h3>NGÀY ' + (index + 1) + ' · ' + formatDate(day.date) + '</h3>' + content + '</section>';
+  return '<section class="timeline-day"' + (workspace ? ' id="' + workspace + '-day-' + index + '" data-itinerary-day="' + index + '"' : '') + '><h3>NGÀY ' + (index + 1) + ' · ' + formatDate(day.date) + '</h3><p class="day-route-label">Tuyến trong ngày: ' + escapeHtml(dayRoute(day)) + '</p>' + content + '</section>';
 }
 
 function budgetStatus(budget, targetBudget) {
@@ -256,6 +284,45 @@ function renderBudget(budget, targetBudget, days) {
   return '<aside class="budget-panel"><h3>Ngân sách dự kiến</h3><div class="budget-total">' + money(budgetData.total) + '</div><small>' + money(budgetData.perPerson) + ' mỗi người' + (days ? ' · ' + days + ' ngày' : '') + '</small><div class="budget-breakdown">' + budgetLines(budgetData) + '</div><div class="budget-status ' + (budgetData.isOverBudget ? 'over' : 'ok') + '"><strong>' + budgetStatus(budgetData, targetBudget) + '</strong><span>' + (budgetData.isOverBudget ? 'Bạn có thể bớt điểm dừng hoặc điều chỉnh mục tiêu.' : 'Dự toán đang nằm trong khoảng bạn chọn.') + '</span></div></aside>';
 }
 
+function itineraryStats(days = []) {
+  const items = days.flatMap((day) => day.items || []);
+  const activeDays = days.filter((day) => (day.items || []).length).length;
+  const average = activeDays ? Math.round((items.length / activeDays) * 10) / 10 : 0;
+  return { items, activeDays, average };
+}
+
+function dayRoute(day = {}) {
+  const areas = [...new Set((day.items || []).map((item) => item.areaLabel).filter(Boolean))];
+  return areas.length ? areas.join(' → ') : 'Chưa có điểm dừng';
+}
+
+function dayStops(day = {}) {
+  const titles = (day.items || []).map((item) => item.title);
+  if (!titles.length) return 'Ngày để trống';
+  return titles.slice(0, 3).join(' · ') + (titles.length > 3 ? ' · …' : '');
+}
+
+function renderDayNavigator(days, workspace) {
+  const active = Math.min(Math.max(0, Number(state.activeItineraryDay) || 0), Math.max(0, days.length - 1));
+  return '<nav class="itinerary-day-nav" aria-label="Đi tới ngày trong lịch trình"><button class="itinerary-nav-chip" type="button" data-action="jump-itinerary-overview" data-workspace="' + workspace + '">Tổng quan</button><div class="itinerary-nav-scroll">' + days.map((day, index) => '<button class="itinerary-nav-chip ' + (index === active ? 'active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '" aria-current="' + (index === active ? 'step' : 'false') + '"><span>Ngày ' + (index + 1) + '</span><small>' + (day.items || []).length + ' điểm</small></button>').join('') + '</div></nav>';
+}
+
+function renderItineraryActions() {
+  return '<div class="itinerary-sticky-actions"><div><strong>Lịch trình của bạn</strong><span>Đặt lại chỉ hoàn tác các chỉnh sửa chưa lưu về lịch trình đã lưu gần nhất.</span></div><div class="itinerary-primary-actions"><button class="button button-ghost button-small" type="button" data-action="open-replan">Điều chỉnh</button><button class="button button-ghost button-small itinerary-reset" type="button" data-action="reset-itinerary">Đặt lại lịch trình</button><button class="button button-primary button-small" type="button" data-action="save-plan">Lưu chuyến đi <span>✓</span></button></div></div>';
+}
+
+function renderItineraryOverview({ destination, startDate, endDate, travelers, intensity, budget, days, workspace, editable = false }) {
+  const stats = itineraryStats(days);
+  const intensityText = intensityLabel(intensity);
+  const metrics = [
+    ['Ngày đi', days.length + ' ngày'],
+    ['Điểm dừng', stats.items.length + ' điểm'],
+    ['Trung bình', stats.average + ' điểm/ngày'],
+    ['Ngân sách', money(budget?.total)]
+  ];
+  return '<section class="itinerary-workspace" id="' + workspace + '-overview"><div class="itinerary-overview-head"><div><span class="kicker">TỔNG QUAN CHUYẾN ĐI</span><h3>' + escapeHtml(destination?.name || 'Chuyến đi của bạn') + '</h3><p>' + formatDate(startDate) + ' → ' + formatDate(endDate) + ' · ' + travelers + ' người · ' + intensityText + '</p></div><div class="itinerary-view-toggle" role="group" aria-label="Mật độ hiển thị lịch trình">' + (editable ? '<button class="view-toggle ' + (state.itineraryView === 'detailed' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="detailed" aria-pressed="' + (state.itineraryView === 'detailed') + '">Chi tiết</button><button class="view-toggle ' + (state.itineraryView === 'compact' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="compact" aria-pressed="' + (state.itineraryView === 'compact') + '">Thu gọn</button>' : '<span class="itinerary-readonly-label">Chế độ xem</span>') + '</div></div><div class="itinerary-metrics">' + metrics.map(([label, value]) => '<div><small>' + label + '</small><strong>' + value + '</strong></div>').join('') + '</div><div class="itinerary-shape" aria-labelledby="' + workspace + '-shape-heading"><div><div><span class="kicker">NHỊP ĐỘ TỪNG NGÀY</span><h4 id="' + workspace + '-shape-heading">Toàn cảnh hành trình</h4></div><p>' + (stats.activeDays ? stats.activeDays + ' ngày có lịch · ' + stats.items.length + ' điểm dừng' : 'Chưa có điểm dừng') + '</p></div><div class="day-overview-list">' + days.map((day, index) => '<button class="day-overview-card ' + (index === Math.min(Math.max(0, Number(state.activeItineraryDay) || 0), Math.max(0, days.length - 1)) ? 'active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '"><span class="day-overview-label">Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</span><strong>' + (day.items || []).length + ' điểm dừng</strong><small>' + escapeHtml(dayStops(day)) + '</small><em>' + escapeHtml(dayRoute(day)) + '</em></button>').join('') + '</div></div></section>';
+}
+
 function renderTripDetail() {
   const target = $('#trips-content');
   if (state.routeStatus === 'loading') {
@@ -270,7 +337,8 @@ function renderTripDetail() {
   const status = tripStatus(plan);
   const services = state.services.filter((item) => item.destinationId === plan.destinationId).slice(0, 3);
   const servicesHtml = services.length ? '<section class="detail-services"><h2>Gợi ý quanh ' + escapeHtml(plan.destination?.name || 'điểm đến') + '</h2><div class="services-grid">' + services.map(serviceCard).join('') + '</div></section>' : '';
-  target.innerHTML = '<a class="back-link" href="/trips" data-route>← Tất cả chuyến đi</a><section class="trip-detail-hero"><div class="trip-detail-copy"><div class="trip-card-topline"><span class="status-badge status-' + status.id + '">' + status.label + '</span><span class="card-eyebrow">' + escapeHtml(plan.destination?.name || 'Điểm đến') + '</span></div><h1>' + escapeHtml(plan.title) + '</h1><p>' + formatDate(plan.startDate) + ' → ' + formatDate(plan.endDate) + '</p><dl class="detail-meta"><div><dt>Người đi</dt><dd>' + plan.travelers + ' người</dd></div><div><dt>Nhịp điệu</dt><dd>' + intensityLabel(plan.intensity) + '</dd></div><div><dt>Ngân sách</dt><dd>' + money(plan.budget?.total) + '</dd></div></dl><div class="detail-actions"><a class="button button-primary" href="/trips/' + encodeURIComponent(plan.id) + '/edit" data-route>Chỉnh sửa lịch trình <span>↗</span></a><button class="button button-ghost" data-action="open-review" data-destination-id="' + plan.destinationId + '">Chia sẻ trải nghiệm</button><button class="text-button danger-action" data-action="delete-plan" data-id="' + plan.id + '">Xóa chuyến đi</button></div></div><div class="trip-detail-image" style="background-image:url(' + (plan.destination?.image || '') + ')" role="img" aria-label="' + escapeHtml(plan.destination?.name || 'Điểm đến') + '"></div></section><section class="detail-content"><div><div class="detail-section-heading"><div><div class="kicker">LỊCH TRÌNH ĐÃ LƯU</div><h2>Từng ngày, thật rõ ràng.</h2></div><p>Hãy xem lại hành trình trước khi tiếp tục tinh chỉnh.</p></div><div class="timeline-list">' + (plan.days || []).map(readonlyDay).join('') + '</div>' + servicesHtml + '</div>' + renderBudget(plan.budget, plan.targetBudget, (plan.days || []).length) + '</section>';
+  const days = plan.days || [];
+  target.innerHTML = '<a class="back-link" href="/trips" data-route>← Tất cả chuyến đi</a><section class="trip-detail-hero"><div class="trip-detail-copy"><div class="trip-card-topline"><span class="status-badge status-' + status.id + '">' + status.label + '</span><span class="card-eyebrow">' + escapeHtml(plan.destination?.name || 'Điểm đến') + '</span></div><h1>' + escapeHtml(plan.title) + '</h1><p>' + formatDate(plan.startDate) + ' → ' + formatDate(plan.endDate) + '</p><dl class="detail-meta"><div><dt>Người đi</dt><dd>' + plan.travelers + ' người</dd></div><div><dt>Nhịp điệu</dt><dd>' + intensityLabel(plan.intensity) + '</dd></div><div><dt>Ngân sách</dt><dd>' + money(plan.budget?.total) + '</dd></div></dl><div class="detail-actions"><a class="button button-primary" href="/trips/' + encodeURIComponent(plan.id) + '/edit" data-route>Chỉnh sửa lịch trình <span>↗</span></a><button class="button button-ghost" data-action="open-review" data-destination-id="' + plan.destinationId + '">Chia sẻ trải nghiệm</button><button class="text-button danger-action" data-action="delete-plan" data-id="' + plan.id + '">Xóa chuyến đi</button></div></div><div class="trip-detail-image" style="background-image:url(' + (plan.destination?.image || '') + ')" role="img" aria-label="' + escapeHtml(plan.destination?.name || 'Điểm đến') + '"></div></section>' + renderItineraryOverview({ destination: plan.destination, startDate: plan.startDate, endDate: plan.endDate, travelers: plan.travelers, intensity: plan.intensity, budget: plan.budget, days, workspace: 'detail' }) + renderDayNavigator(days, 'detail') + '<section class="detail-content"><div><div class="detail-section-heading"><div><div class="kicker">LỊCH TRÌNH ĐÃ LƯU</div><h2>Từng ngày, thật rõ ràng.</h2></div><p>Chọn một ngày để đi thẳng đến lịch trình chi tiết.</p></div><div class="timeline-list">' + days.map((day, index) => readonlyDay(day, index, new Set(), 'detail')).join('') + '</div>' + servicesHtml + '</div>' + renderBudget(plan.budget, plan.targetBudget, days.length) + '</section>';
 }
 
 function serviceCard(item) {
@@ -565,7 +633,7 @@ function pickerCard(item, action = 'toggle-place') {
   const label = placeCategories(item).map((category) => categoryLabels[category] || category).join(' · ');
   const summary = ratingSummaryFor(item.id);
   const ratingLabel = summary.count ? 'Xem ' + summary.count + ' đánh giá, trung bình ' + Number(summary.average).toFixed(1) + ' sao cho ' + item.name : 'Xem đánh giá cho ' + item.name;
-  return '<article class="picker-card ' + (selected ? 'selected' : '') + '"><button class="picker-select" type="button" data-action="' + action + '" data-id="' + item.id + '" aria-pressed="' + selected + '" aria-label="' + (selected ? 'Bỏ chọn ' : 'Thêm ') + escapeHtml(item.name) + '"><span class="picker-img" style="background-image:url(' + item.image + ')"></span><span class="picker-body"><strong>' + escapeHtml(item.name) + '</strong><span class="place-area">' + escapeHtml(item.areaLabel || '') + '</span><span class="picker-description">' + escapeHtml(item.description) + '</span><span class="picker-foot"><span>' + escapeHtml(label) + ' · ' + item.recommendedDurationMinutes + ' phút · ' + money(item.estimatedCost) + '</span><span class="selected-pill">' + (selected ? '✓ Đã chọn' : item.hiddenGem ? 'Hidden gem · Thêm +' : 'Thêm +') + '</span></span></span></button><button class="rating-link" type="button" data-action="open-place-reviews" data-id="' + item.id + '" aria-label="' + escapeHtml(ratingLabel) + '">' + ratingText(summary) + '<span aria-hidden="true">↗</span></button></article>';
+  return '<article class="picker-card ' + (selected ? 'selected' : '') + '"><button class="picker-select" type="button" data-action="' + action + '" data-id="' + item.id + '" aria-pressed="' + selected + '" aria-label="' + (selected ? 'Bỏ chọn ' : 'Thêm ') + escapeHtml(item.name) + '"><span class="picker-img" style="background-image:url(' + item.image + ')"></span><span class="picker-body"><strong>' + escapeHtml(item.name) + '</strong><span class="place-area">' + escapeHtml(item.areaLabel || '') + '</span><span class="picker-description">' + escapeHtml(item.description) + '</span><span class="picker-foot"><span>' + escapeHtml(label) + ' · ' + item.recommendedDurationMinutes + ' phút · ' + money(item.estimatedCost) + '</span><span class="selected-pill">' + (selected ? '✓ Đã chọn' : 'Thêm +') + '</span></span></span></button><button class="rating-link" type="button" data-action="open-place-reviews" data-id="' + item.id + '" aria-label="' + escapeHtml(ratingLabel) + '">' + ratingText(summary) + '<span aria-hidden="true">↗</span></button></article>';
 }
 
 function renderStepTwo() {
@@ -583,6 +651,45 @@ function renderStepTwo() {
   return '<div class="step-panel"><h3>Điều gì làm bạn muốn đi?</h3><p>Chọn sở thích để lọc gợi ý, tìm nhanh theo tên và lưu các nơi bạn thật sự muốn ghé.</p><div class="choice-grid">' + interests.map(([id, icon, label]) => '<button class="choice ' + ((state.draft.interests || []).map(normalizeCategory).includes(id) ? 'selected' : '') + '" type="button" data-action="toggle-interest" data-interest="' + id + '" aria-pressed="' + ((state.draft.interests || []).map(normalizeCategory).includes(id)) + '"><b aria-hidden="true">' + icon + '</b><small>' + label + '</small></button>').join('') + '</div>' + selectedSummary + '<label class="place-search" for="place-search"><span aria-hidden="true">⌕</span><span class="sr-only">Tìm địa điểm</span><input id="place-search" type="search" data-place-search value="' + escapeHtml(state.placeSearch) + '" placeholder="Tìm theo tên hoặc khu vực"></label><div class="place-picker"><div class="recommendation-note">' + candidates.length + ' / ' + all.length + ' địa điểm phù hợp tại ' + escapeHtml(destination(state.draft.destinationId)?.name) + '</div>' + resultHtml + '</div></div>';
 }
 
+function platformLabel(value) {
+  return ({ tiktok: 'TikTok', youtube: 'YouTube', instagram: 'Instagram', google_maps: 'Google Maps', other: 'Link du lịch' }[value] || 'Link du lịch');
+}
+
+function isSupportedUrlShape(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    return ['http:', 'https:'].includes(url.protocol) && Boolean(url.hostname);
+  } catch { return false; }
+}
+
+function renderInspirationStep() {
+  const result = state.inspirationResolution;
+  const selectedIds = state.draft.selectedPlaceIds || [];
+  const inspirationItems = state.draft.inspirationItems || [];
+  let resultHtml = '';
+  if (result?.status === 'loading') resultHtml = '<div class="inspiration-status is-loading" role="status">Đang tìm địa điểm…</div>';
+  if (result?.status === 'unsupported') resultHtml = '<div class="inspiration-status is-neutral" role="status"><strong>Chưa tìm thấy địa điểm từ liên kết này.</strong><span>Kiểm tra lại liên kết hoặc thử một liên kết khác.</span></div>';
+  if (result?.status === 'error') resultHtml = '<div class="inspiration-status is-error" role="alert">' + escapeHtml(result.message) + '</div>';
+  if (result?.status === 'unavailable') resultHtml = '<div class="inspiration-status is-neutral" role="status"><strong>Đã tìm thấy ' + escapeHtml(result.resolved?.name || 'địa điểm này') + '.</strong><span>Địa điểm này hiện chưa khả dụng để thêm vào chuyến đi.</span></div>';
+  if (result?.status === 'mismatch') resultHtml = '<div class="inspiration-status is-mismatch" role="status"><strong>' + escapeHtml(result.place?.name || 'Địa điểm này') + ' thuộc ' + escapeHtml(result.destination?.name || result.destination?.province || 'điểm đến khác') + '.</strong><span>Địa điểm này không nằm trong điểm đến hiện tại của chuyến đi, nên chưa thể thêm vào lịch trình.</span></div>';
+  if (result?.status === 'matched') {
+    const item = result.place;
+    const rating = ratingSummaryFor(item.id);
+    const alreadyAdded = inspirationItems.some((entry) => entry.placeId === item.id);
+    const alreadySelected = selectedIds.includes(item.id);
+    const label = placeCategories(item).map((category) => categoryLabels[category] || category).join(' · ');
+    resultHtml = '<article class="inspiration-match"><div class="inspiration-match-image" style="background-image:url(' + escapeHtml(item.image) + ')"></div><div class="inspiration-match-copy"><span class="inspiration-platform">' + escapeHtml(platformLabel(result.mapping?.platform)) + '</span><h4>' + escapeHtml(item.name) + '</h4><p>' + escapeHtml(result.destination?.name || item.areaLabel || '') + ' · ' + escapeHtml(label) + '</p><small>' + escapeHtml(ratingText(rating)) + '</small><p class="inspiration-match-note">' + (alreadyAdded || alreadySelected ? 'Địa điểm này đã có trong chuyến đi của bạn.' : 'Đã tìm thấy địa điểm cho chuyến đi của bạn.') + '</p><button class="button button-primary button-small" type="button" data-action="add-inspiration" ' + (alreadyAdded || alreadySelected ? 'disabled' : '') + '>' + (alreadyAdded || alreadySelected ? '✓ Đã chọn' : 'Thêm vào chuyến đi') + '</button></div></article>';
+  }
+  const added = inspirationItems.map((entry) => {
+    const item = place(entry.placeId);
+    return item ? '<li><span><strong>' + escapeHtml(item.name) + '</strong><small>' + escapeHtml(platformLabel(entry.platform)) + ' · thêm từ link</small></span><button type="button" class="text-button" data-action="remove-inspiration" data-id="' + escapeHtml(entry.mappingId) + '" aria-label="Xóa ' + escapeHtml(item.name) + ' khỏi danh sách cảm hứng">Xóa</button></li>' : '';
+  }).join('');
+  const addedHtml = inspirationItems.length ? '<section class="inspiration-added" aria-labelledby="inspiration-added-heading"><div><span class="kicker">ĐÃ THÊM TỪ LINK · ' + inspirationItems.length + '</span><h4 id="inspiration-added-heading">Nơi bạn muốn ghé</h4></div><ul>' + added + '</ul></section>' : '';
+  const canResolve = isSupportedUrlShape(state.inspirationInput);
+  const inlineError = state.inspirationInput && !canResolve ? 'Vui lòng dán một đường link hợp lệ.' : '';
+  return '<div class="step-panel inspiration-panel"><div class="inspiration-heading"><span class="kicker">TÙY CHỌN</span><h3>Thêm nơi bạn muốn ghé</h3><p>Dán liên kết từ TikTok, YouTube, Instagram hoặc Google Maps để tìm địa điểm cho chuyến đi.</p></div><form class="inspiration-form" data-form="inspiration" novalidate><label class="field" for="inspiration-url"><span>Dán liên kết</span><input id="inspiration-url" name="url" type="text" inputmode="url" autocomplete="url" value="' + escapeHtml(state.inspirationInput) + '" placeholder="Dán liên kết tại đây…" data-inspiration-url aria-describedby="inspiration-help inspiration-validation inspiration-result"></label><button class="button button-primary" type="submit" data-inspiration-submit ' + (canResolve ? '' : 'disabled') + '>Tìm địa điểm <span>→</span></button></form><p class="inspiration-validation" id="inspiration-validation" role="alert" ' + (inlineError ? '' : 'hidden') + '>' + inlineError + '</p><p class="inspiration-help" id="inspiration-help">Bạn có thể tiếp tục bất cứ lúc nào mà không cần thêm liên kết.</p><div id="inspiration-result">' + resultHtml + '</div>' + addedHtml + '</div>';
+}
+
 function timeToMinutes(value) {
   const match = String(value || '').match(/^(\\d{1,2}):(\\d{2})$/);
   return match ? Number(match[1]) * 60 + Number(match[2]) : 0;
@@ -593,17 +700,20 @@ function minutesToTime(total) {
 }
 
 function updateItemField(item, field, value) {
+  if (field === 'startTime' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(value))) return;
   item[field] = field === 'durationMinutes' ? Math.max(30, Number(value) || 30) : value;
   if (field === 'startTime' || field === 'durationMinutes') item.endTime = minutesToTime(timeToMinutes(item.startTime) + (Number(item.durationMinutes) || 120));
 }
 
 function editorDay(day, dayIndex) {
   const items = day.items || [];
+  const compact = state.itineraryView === 'compact';
   const itemHtml = items.map((item, index) => {
+    if (compact) return '<div class="timeline-item compact-item' + (index < items.length - 1 ? ' has-next' : '') + '">' + timelineTime(item) + '<div class="timeline-rail" aria-hidden="true"><span></span></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(item.areaLabel || categoryLabels[item.category] || 'Điểm dừng') + ' · ' + item.durationMinutes + ' phút</small></div>' + timelineGap(item, items[index + 1]) + '</div>';
     const dayOptions = (state.generated?.itinerary || []).map((entry, targetIndex) => '<option value="' + targetIndex + '" ' + (targetIndex === dayIndex ? 'selected' : '') + '>Ngày ' + (targetIndex + 1) + '</option>').join('');
-    return '<div class="timeline-item editable-item" data-day="' + dayIndex + '" data-index="' + index + '"><div class="time"><input class="inline-input" type="time" data-item-field="startTime" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + escapeHtml(item.startTime) + '" aria-label="Giờ bắt đầu ' + escapeHtml(item.title) + '"><small>đến ' + escapeHtml(item.endTime) + '</small></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + money(item.estimatedCost) + '/người</small><label class="duration-control">Thời lượng <input class="duration-input" type="number" min="30" step="15" data-item-field="durationMinutes" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + item.durationMinutes + '" aria-label="Thời lượng ' + escapeHtml(item.title) + '"> phút</label></div><div class="timeline-controls"><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="up" aria-label="Đưa ' + escapeHtml(item.title) + ' lên">↑</button><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="down" aria-label="Đưa ' + escapeHtml(item.title) + ' xuống">↓</button><select class="move-select" data-action="move-item-to-day" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Di chuyển ' + escapeHtml(item.title) + ' sang ngày khác"><option value="">Di chuyển đến…</option>' + dayOptions + '</select><button class="icon-button" type="button" data-action="remove-item" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Xóa ' + escapeHtml(item.title) + '">×</button></div></div>';
+    return '<div class="timeline-item editable-item' + (index < items.length - 1 ? ' has-next' : '') + '" data-day="' + dayIndex + '" data-index="' + index + '">' + timelineTime(item, { editable: true, dayIndex }) + '<div class="timeline-rail" aria-hidden="true"><span></span></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + money(item.estimatedCost) + '/người</small><label class="duration-control">Thời lượng <input class="duration-input" type="number" min="30" step="15" data-item-field="durationMinutes" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + item.durationMinutes + '" aria-label="Thời lượng ' + escapeHtml(item.title) + '"> phút</label></div><div class="timeline-controls"><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="up" aria-label="Đưa ' + escapeHtml(item.title) + ' lên">↑</button><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="down" aria-label="Đưa ' + escapeHtml(item.title) + ' xuống">↓</button><select class="move-select" data-action="move-item-to-day" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Di chuyển ' + escapeHtml(item.title) + ' sang ngày khác"><option value="">Di chuyển đến…</option>' + dayOptions + '</select><button class="icon-button" type="button" data-action="remove-item" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Xóa ' + escapeHtml(item.title) + '">×</button></div>' + timelineGap(item, items[index + 1]) + '</div>';
   }).join('');
-  return '<section class="timeline-day editable-day" data-drop-day="' + dayIndex + '"><h4>NGÀY ' + (dayIndex + 1) + ' · ' + formatDate(day.date) + '</h4>' + (itemHtml || '<p class="empty-day-message">Chưa có hoạt động nào trong ngày này. Bạn vẫn có thể chuyển điểm dừng vào đây.</p>') + '</section>';
+  return '<section class="timeline-day editable-day' + (compact ? ' is-compact' : '') + '" id="editor-day-' + dayIndex + '" data-itinerary-day="' + dayIndex + '" data-drop-day="' + dayIndex + '"><h4>NGÀY ' + (dayIndex + 1) + ' · ' + formatDate(day.date) + '</h4><p class="day-route-label">Tuyến trong ngày: ' + escapeHtml(dayRoute(day)) + '</p>' + (itemHtml || '<p class="empty-day-message">Chưa có hoạt động nào trong ngày này. Bạn vẫn có thể chuyển điểm dừng vào đây.</p>') + (compact && items.length ? '<p class="compact-day-hint">Chuyển sang Chi tiết để đổi giờ, thời lượng hoặc thứ tự.</p>' : '') + '</section>';
 }
 
 function renderPlanner() {
@@ -616,19 +726,21 @@ function renderPlanner() {
     target.innerHTML = '<div class="planner-invite"><div><div class="kicker">SẴN SÀNG CHƯA?</div><h3>Hãy để chuyến đi bắt đầu từ một ý thích.</h3><p>Chọn điểm đến, ngày đi và nhịp độ. PinkTrip sẽ tạo cho bạn một bản nháp để tiếp tục chỉnh sửa.</p></div><button class="button button-primary" data-action="new-trip">Bắt đầu <span>↗</span></button></div>';
     return;
   }
-  const nav = '<div class="planner-steps">' + ['Thông tin', 'Điểm đến', 'Lịch trình'].map((item, index) => '<span class="planner-step ' + (index === state.step ? 'active ' : '') + (index < state.step ? 'done' : '') + '">' + String(index + 1).padStart(2, '0') + ' ' + item + '</span>').join('') + '</div>';
+  const nav = '<div class="planner-steps">' + ['Thông tin', 'Điểm đến', 'Cảm hứng', 'Lịch trình'].map((item, index) => '<span class="planner-step ' + (index === state.step ? 'active ' : '') + (index < state.step ? 'done' : '') + '">' + String(index + 1).padStart(2, '0') + ' ' + item + '</span>').join('') + '</div>';
   let content = '';
   if (state.step === 0) {
     content = '<div class="step-panel"><h3>Chuyến đi này có gì đặc biệt?</h3><p>Cho PinkTrip biết vài điều cơ bản để bắt đầu sắp xếp.</p><div class="form-grid"><div class="field"><label for="trip-title">Tên chuyến đi</label><input id="trip-title" data-draft="title" value="' + escapeHtml(state.draft.title) + '" placeholder="Ví dụ: Cuối tuần ở biển"></div><div class="field"><label for="trip-destination">Điểm đến</label><select id="trip-destination" data-draft="destinationId">' + state.destinations.map((item) => '<option value="' + item.id + '" ' + (item.id === state.draft.destinationId ? 'selected' : '') + '>' + escapeHtml(item.name) + ' · ' + escapeHtml(item.province) + '</option>').join('') + '</select></div><div class="field"><label for="trip-start">Ngày bắt đầu</label><input id="trip-start" type="date" data-draft="startDate" value="' + state.draft.startDate + '"></div><div class="field"><label for="trip-end">Ngày kết thúc</label><input id="trip-end" type="date" data-draft="endDate" value="' + state.draft.endDate + '"></div><div class="field"><label for="trip-travelers">Số người</label><input id="trip-travelers" type="number" min="1" max="12" data-draft="travelers" value="' + state.draft.travelers + '"></div><div class="field"><label for="trip-budget">Ngân sách cả chuyến</label><div class="money-wrap"><input id="trip-budget" type="number" min="0" step="100000" data-draft="targetBudget" value="' + state.draft.targetBudget + '"><span>VND</span></div></div><div class="field"><label for="trip-intensity">Nhịp điệu</label><select id="trip-intensity" data-draft="intensity"><option value="relaxed" ' + (state.draft.intensity === 'relaxed' ? 'selected' : '') + '>Thảnh thơi</option><option value="balanced" ' + (state.draft.intensity === 'balanced' ? 'selected' : '') + '>Cân bằng</option><option value="packed" ' + (state.draft.intensity === 'packed' ? 'selected' : '') + '>Nhiều trải nghiệm</option></select></div></div></div>';
   } else if (state.step === 1) {
     content = renderStepTwo();
-  } else if (state.step === 2 && state.generated) {
+  } else if (state.step === 2) {
+    content = renderInspirationStep();
+  } else if (state.step === 3 && state.generated) {
     const other = state.places.filter((item) => item.destinationId === state.generated.destination.id && !(state.draft.selectedPlaceIds || []).includes(item.id)).slice(0, 3);
-    content = '<div class="step-panel"><div class="trip-summary"><div><small>ĐIỂM ĐẾN</small><strong>' + escapeHtml(state.generated.destination.name) + '</strong></div><div><small>NHỊP ĐIỆU</small><strong>' + intensityLabel(state.draft.intensity) + '</strong></div><div><small>ĐỊA ĐIỂM</small><strong>' + state.draft.selectedPlaceIds.length + ' đã chọn</strong></div></div><div class="editor-toolbar"><div><strong>Lịch trình hiện tại</strong><span>Chọn ngày đích để di chuyển, hoặc dùng ↑ ↓ để đổi thứ tự.</span></div><button class="button button-ghost button-small" type="button" data-action="open-replan">Có thay đổi?</button></div><div class="result-grid"><div><div class="timeline-list">' + state.generated.itinerary.map(editorDay).join('') + '</div><section class="add-stop-section"><h4>Muốn thêm một điểm dừng?</h4><p>Thêm vào lựa chọn rồi PinkTrip sẽ xếp lại bản nháp.</p><div class="place-picker">' + other.map((item) => pickerCard(item, 'add-stop')).join('') + '</div></section></div>' + renderBudget(state.generated.budget, state.draft.targetBudget, state.generated.itinerary.length) + '</div></div>';
+    content = '<div class="step-panel itinerary-editor-panel">' + renderItineraryOverview({ destination: state.generated.destination, startDate: state.draft.startDate, endDate: state.draft.endDate, travelers: state.draft.travelers, intensity: state.draft.intensity, budget: state.generated.budget, days: state.generated.itinerary, workspace: 'editor', editable: true }) + renderDayNavigator(state.generated.itinerary, 'editor') + renderItineraryActions() + '<div class="editor-toolbar"><div><strong>' + (state.itineraryView === 'compact' ? 'Tóm tắt lịch trình' : 'Chỉnh sửa lịch trình') + '</strong><span>' + (state.itineraryView === 'compact' ? 'Xem nhịp di chuyển trong ngày. Chuyển sang Chi tiết khi cần chỉnh sửa.' : 'Chọn ngày đích để di chuyển, hoặc dùng ↑ ↓ để đổi thứ tự.') + '</span></div></div><div class="result-grid"><div><div class="timeline-list">' + state.generated.itinerary.map(editorDay).join('') + '</div><section class="add-stop-section"><h4>Muốn thêm một điểm dừng?</h4><p>Thêm vào lựa chọn rồi PinkTrip sẽ xếp lại bản nháp.</p><div class="place-picker">' + other.map((item) => pickerCard(item, 'add-stop')).join('') + '</div></section></div>' + renderBudget(state.generated.budget, state.draft.targetBudget, state.generated.itinerary.length) + '</div></div>';
   }
-  const nextLabel = state.step === 1 ? 'Tạo lịch trình' : 'Tiếp tục';
-  const footerActions = state.step === 2
-    ? '<button class="button button-ghost button-small" type="button" data-action="regenerate">↻ Xếp lại</button><button class="button button-primary button-small" type="button" data-action="save-plan">Lưu chuyến đi <span>✓</span></button>'
+  const nextLabel = state.step === 2 ? 'Tiếp tục không thêm link' : state.step === 1 ? 'Tiếp tục' : 'Tiếp tục';
+  const footerActions = state.step === 3
+    ? ''
     : '<button class="button button-primary button-small" type="button" data-action="next-step">' + nextLabel + ' <span>→</span></button>';
   target.innerHTML = nav + content + '<div class="planner-actions"><button class="button button-ghost button-small" type="button" data-action="prev-step" ' + (state.step === 0 ? 'disabled' : '') + '>← Quay lại</button><div>' + footerActions + '</div></div>';
 }
@@ -656,6 +768,7 @@ function render() {
   if (state.route.view === 'detail') renderTripDetail();
   if (state.route.view === 'reviews') renderReviewPage();
   if (state.replanOpen) renderReplanModal();
+  if (state.resetConfirmOpen) renderResetConfirmation();
   if (state.reviewModalOpen) renderReviewModal();
   if (state.reviewDetail) renderPlaceReviewModal();
 }
@@ -683,19 +796,24 @@ function openAuth(mode) {
   const login = mode === 'login';
   lastAuthTrigger = document.activeElement;
   lastModalTrigger = lastAuthTrigger;
-  $('#modal-root').innerHTML = '<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title"><button class="modal-close" type="button" data-action="close-modal" aria-label="Đóng cửa sổ">×</button><div class="kicker">PINKTRIP</div><h2 id="auth-title">' + (login ? 'Chào mừng trở lại.' : 'Bắt đầu hành trình.') + '</h2><p>' + (login ? 'Đăng nhập để xem những chuyến đi đã lưu.' : 'Tạo tài khoản demo để lưu lịch trình của riêng bạn.') + '</p><form data-form="auth"><input type="hidden" name="mode" value="' + mode + '">' + (login ? '' : '<div class="field"><label for="auth-name">Tên của bạn</label><input id="auth-name" name="name" required autocomplete="name" placeholder="Ví dụ: Minh Anh"></div>') + '<div class="field"><label for="auth-email">Email</label><input id="auth-email" name="email" type="email" required autocomplete="email" placeholder="you@example.com"></div><div class="field"><label for="auth-password">Mật khẩu</label><input id="auth-password" name="password" minlength="8" type="password" required autocomplete="' + (login ? 'current-password' : 'new-password') + '" placeholder="Tối thiểu 8 ký tự"></div><div class="error-message" data-auth-error aria-live="polite"></div><button class="button button-primary" type="submit" style="width:100%">' + (login ? 'Đăng nhập' : 'Tạo tài khoản') + ' <span>↗</span></button></form><div class="modal-switch">' + (login ? 'Chưa có tài khoản?' : 'Đã có tài khoản?') + ' <button type="button" data-action="' + (login ? 'register' : 'login') + '">' + (login ? 'Đăng ký' : 'Đăng nhập') + '</button></div></section></div>';
+  $('#modal-root').innerHTML = '<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title"><button class="modal-close" type="button" data-action="close-modal" aria-label="Đóng cửa sổ">×</button><div class="kicker">PINKTRIP</div><h2 id="auth-title">' + (login ? 'Chào mừng trở lại.' : 'Bắt đầu hành trình.') + '</h2><p>' + (login ? 'Đăng nhập để xem những chuyến đi đã lưu.' : 'Tạo tài khoản để lưu lịch trình của riêng bạn.') + '</p><form data-form="auth"><input type="hidden" name="mode" value="' + mode + '">' + (login ? '' : '<div class="field"><label for="auth-name">Tên của bạn</label><input id="auth-name" name="name" required autocomplete="name" placeholder="Ví dụ: Minh Anh"></div>') + '<div class="field"><label for="auth-email">Email</label><input id="auth-email" name="email" type="email" required autocomplete="email" placeholder="you@example.com"></div><div class="field"><label for="auth-password">Mật khẩu</label><input id="auth-password" name="password" minlength="8" type="password" required autocomplete="' + (login ? 'current-password' : 'new-password') + '" placeholder="Tối thiểu 8 ký tự"></div><div class="error-message" data-auth-error aria-live="polite"></div><button class="button button-primary" type="submit" style="width:100%">' + (login ? 'Đăng nhập' : 'Tạo tài khoản') + ' <span>↗</span></button></form><div class="modal-switch">' + (login ? 'Chưa có tài khoản?' : 'Đã có tài khoản?') + ' <button type="button" data-action="' + (login ? 'register' : 'login') + '">' + (login ? 'Đăng ký' : 'Đăng nhập') + '</button></div></section></div>';
   requestAnimationFrame(() => $('#modal-root input:not([type="hidden"])')?.focus());
 }
 
 function loadPlanIntoEditor(plan) {
   state.editingPlanId = plan.id;
   state.plannerOpen = true;
-  state.step = 2;
-  state.draft = { title: plan.title, destinationId: plan.destinationId, startDate: plan.startDate, endDate: plan.endDate, travelers: plan.travelers, targetBudget: plan.targetBudget, accommodationLevel: plan.accommodationLevel || 'comfort', intensity: plan.intensity || 'balanced', interests: plan.interests || [], selectedPlaceIds: plan.selectedPlaceIds || [] };
+  state.step = 3;
+  state.draft = { title: plan.title, destinationId: plan.destinationId, startDate: plan.startDate, endDate: plan.endDate, travelers: plan.travelers, targetBudget: plan.targetBudget, accommodationLevel: plan.accommodationLevel || 'comfort', intensity: plan.intensity || 'balanced', interests: plan.interests || [], selectedPlaceIds: plan.selectedPlaceIds || [], stepTwoPlaceIds: (plan.selectedPlaceIds || []).filter((id) => !(plan.inspirationItems || []).some((item) => item.placeId === id)), inspirationItems: plan.inspirationItems || [] };
   state.generated = { destination: plan.destination, itinerary: clone(plan.days || []), budget: clone(plan.budget || {}) };
+  establishItineraryBaseline({ itinerary: plan.days || [], budget: plan.budget || {} });
   state.generatedSignature = draftSignature();
   state.placeSearch = '';
   state.placeVisibleCount = 12;
+  state.inspirationResolution = null;
+  state.inspirationInput = '';
+  state.itineraryView = 'detailed';
+  state.activeItineraryDay = 0;
 }
 
 async function applyRoute({ scroll = true } = {}) {
@@ -760,6 +878,7 @@ function navigate(path, options = {}) {
 async function generate() {
   try {
     state.generated = await api('/api/plans/generate', { method: 'POST', body: state.draft });
+    establishItineraryBaseline();
     state.generatedSignature = draftSignature();
     render();
   } catch (error) {
@@ -776,10 +895,15 @@ function startNewTrip(id) {
   state.step = 0;
   state.editingPlanId = null;
   state.generated = null;
+  state.itineraryBaseline = null;
   state.generatedSignature = null;
   state.draft = defaultDraft(id);
   state.placeSearch = '';
   state.placeVisibleCount = 12;
+  state.inspirationResolution = null;
+  state.inspirationInput = '';
+  state.itineraryView = 'detailed';
+  state.activeItineraryDay = 0;
   navigate('/trips/new', { scroll: false });
   requestAnimationFrame(() => $('#planner').scrollIntoView({ behavior: 'smooth' }));
 }
@@ -790,6 +914,9 @@ async function persistCurrentPlan() {
     ? await api('/api/plans/' + encodeURIComponent(state.editingPlanId), { method: 'PUT', body: payload })
     : await api('/api/plans', { method: 'POST', body: payload });
   state.activeTrip = result.plan;
+  state.generated.itinerary = clone(result.plan.days || []);
+  state.generated.budget = clone(result.plan.budget || {});
+  establishItineraryBaseline({ itinerary: result.plan.days || [], budget: result.plan.budget || {} });
   await refreshPlans();
   return result.plan;
 }
@@ -807,6 +934,86 @@ async function savePlan() {
   } catch (error) {
     toast(error.message);
   }
+}
+
+function jumpToItineraryDay(workspace, dayIndex) {
+  state.activeItineraryDay = Math.max(0, Number(dayIndex) || 0);
+  const selector = '#' + workspace + '-day-' + state.activeItineraryDay;
+  render();
+  requestAnimationFrame(() => document.querySelector(selector)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+}
+
+function jumpToItineraryOverview(workspace) {
+  state.activeItineraryDay = 0;
+  render();
+  requestAnimationFrame(() => document.querySelector('#' + workspace + '-overview')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+}
+
+function syncActiveItineraryDay() {
+  itineraryScrollFrame = null;
+  const days = [...document.querySelectorAll('[data-itinerary-day]')];
+  if (!days.length) return;
+  const marker = 180;
+  const atDocumentEnd = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 8;
+  const current = atDocumentEnd ? days[days.length - 1] : days.reduce((closest, day) => {
+    const top = day.getBoundingClientRect().top;
+    if (top <= marker) return day;
+    return closest || day;
+  }, null);
+  const next = Number(current?.dataset.itineraryDay);
+  if (!Number.isInteger(next) || next === state.activeItineraryDay) return;
+  state.activeItineraryDay = next;
+  document.querySelectorAll('[data-action="jump-itinerary-day"]').forEach((button) => {
+    if (Number(button.dataset.dayIndex) !== next) return;
+    button.classList.add('active');
+    button.setAttribute('aria-current', 'step');
+  });
+  document.querySelectorAll('[data-action="jump-itinerary-day"]').forEach((button) => {
+    if (Number(button.dataset.dayIndex) === next) return;
+    button.classList.remove('active');
+    button.setAttribute('aria-current', 'false');
+  });
+}
+
+function scheduleItineraryScrollSync() {
+  if (itineraryScrollFrame !== null) return;
+  itineraryScrollFrame = requestAnimationFrame(syncActiveItineraryDay);
+}
+
+function renderResetConfirmation() {
+  $('#modal-root').innerHTML = '<div class="modal-backdrop"><section class="modal reset-modal" role="dialog" aria-modal="true" aria-labelledby="reset-itinerary-title" aria-describedby="reset-itinerary-description"><button class="modal-close" type="button" data-action="cancel-reset-itinerary" aria-label="Đóng cửa sổ">×</button><div class="kicker">HOÀN TÁC CHỈNH SỬA</div><h2 id="reset-itinerary-title">Đặt lại lịch trình?</h2><p id="reset-itinerary-description">Những thay đổi chưa lưu về giờ, thời lượng, thứ tự và ngày sẽ được hoàn tác. Lịch trình trở về phiên bản đã lưu gần nhất.</p><div class="modal-actions"><button class="button button-ghost" type="button" data-action="cancel-reset-itinerary">Hủy</button><button class="button button-primary" type="button" data-action="confirm-reset-itinerary">Đặt lại</button></div></section></div>';
+  requestAnimationFrame(() => $('[data-action="confirm-reset-itinerary"]')?.focus());
+}
+
+function openResetConfirmation() {
+  if (!state.generated?.itinerary || !state.itineraryBaseline) return toast('Chưa có phiên bản lịch trình để khôi phục');
+  lastModalTrigger = document.activeElement;
+  state.resetConfirmOpen = true;
+  renderResetConfirmation();
+}
+
+function closeResetConfirmation(restoreFocus = true) {
+  state.resetConfirmOpen = false;
+  $('#modal-root').innerHTML = '';
+  if (restoreFocus && lastModalTrigger instanceof HTMLElement) lastModalTrigger.focus();
+}
+
+function confirmResetItinerary() {
+  const restored = window.PinkTripItineraryState.restoreBaseline(state.itineraryBaseline);
+  if (!restored || !state.generated) return closeResetConfirmation();
+  clearTimeout(itineraryNormalizeTimer);
+  itineraryMutationVersion += 1;
+  const activeDay = Math.min(Math.max(0, state.activeItineraryDay), Math.max(0, restored.itinerary.length - 1));
+  state.generated.itinerary = restored.itinerary;
+  state.generated.budget = restored.budget;
+  state.activeItineraryDay = activeDay;
+  closeResetConfirmation(false);
+  renderPlanner();
+  requestAnimationFrame(() => {
+    document.querySelector('.itinerary-editor-panel [data-action="reset-itinerary"]')?.focus();
+    document.querySelector('#editor-day-' + activeDay)?.scrollIntoView({ block: 'nearest' });
+  });
+  toast('Đã khôi phục lịch trình đã lưu.');
 }
 
 async function deletePlan(id) {
@@ -836,13 +1043,24 @@ function moveCandidate(fromDay, index, toDay, toIndex = null) {
 }
 
 async function normalizeEditor(candidate, selectedIds = state.draft.selectedPlaceIds) {
+  const requestVersion = ++itineraryMutationVersion;
   const result = await api('/api/plans/recalculate', {
     method: 'POST',
     body: { itinerary: candidate, ...state.draft, selectedPlaceIds: selectedIds }
   });
+  if (requestVersion !== itineraryMutationVersion) return;
   state.generated.itinerary = result.itinerary;
   state.generated.budget = result.budget;
   renderPlanner();
+}
+
+function scheduleEditorNormalization(delay = 300) {
+  clearTimeout(itineraryNormalizeTimer);
+  itineraryNormalizeTimer = setTimeout(() => {
+    itineraryNormalizeTimer = null;
+    if (!state.generated?.itinerary) return;
+    normalizeEditor(clone(state.generated.itinerary)).catch((error) => toast(error.message));
+  }, delay);
 }
 
 async function moveItem(fromDay, index, toDay, toIndex = null) {
@@ -880,7 +1098,7 @@ function replanOptions() {
 
 function replanCompletedItems() {
   const items = currentItems();
-  return items.length ? '<fieldset class="field completed-list"><legend>Đã hoàn thành (giữ nguyên)</legend><div>' + items.map(({ item }) => '<label><input type="checkbox" data-replan-completed="' + item.id + '" ' + (state.replanDraft.completedItemIds.includes(item.id) ? 'checked' : '') + '> <span>' + escapeHtml(item.title) + '</span></label>').join('') + '</div></fieldset>' : '';
+  return items.length ? '<fieldset class="completed-list" aria-describedby="completed-activities-hint"><legend><span class="replan-section-index" aria-hidden="true">1</span>Hoạt động đã hoàn thành</legend><p class="completed-list-hint" id="completed-activities-hint">Chọn những hoạt động bạn đã hoàn thành. PinkTrip sẽ giữ nguyên chúng khi điều chỉnh lịch trình.</p><div>' + items.map(({ item }) => '<label class="completed-row" for="replan-completed-' + escapeHtml(item.id) + '"><input id="replan-completed-' + escapeHtml(item.id) + '" type="checkbox" data-replan-completed="' + escapeHtml(item.id) + '" ' + (state.replanDraft.completedItemIds.includes(item.id) ? 'checked' : '') + '><span class="completed-row-copy"><span class="completed-row-title">' + escapeHtml(item.title) + '</span><span class="completed-row-note">Được giữ nguyên</span></span></label>').join('') + '</div></fieldset>' : '';
 }
 
 function renderReplanModal() {
@@ -888,10 +1106,13 @@ function renderReplanModal() {
   const draft = state.replanDraft || defaultReplanDraft();
   state.replanDraft = draft;
   const typeOptions = replanTypes().map(([id, label]) => '<option value="' + id + '" ' + (draft.type === id ? 'selected' : '') + '>' + label + '</option>').join('');
-  let body = '<form data-form="replan"><div class="field"><label for="replan-type">Điều gì đã thay đổi?</label><select id="replan-type" data-replan-field="type">' + typeOptions + '</select></div><div class="field"><label for="replan-day">Ngày bị ảnh hưởng</label><select id="replan-day" data-replan-field="dayIndex">' + (state.generated?.itinerary || []).map((day, index) => '<option value="' + index + '" ' + (index === Number(draft.dayIndex) ? 'selected' : '') + '>Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</option>').join('') + '</select></div>' + replanOptions() + replanCompletedItems() + '<div class="field"><label for="replan-note">Ghi chú thêm <span class="optional">(không bắt buộc)</span></label><textarea id="replan-note" data-replan-field="note" placeholder="Ví dụ: Ưu tiên nghỉ ngơi và tránh di chuyển xa"></textarea></div><div class="error-message" id="replan-error" aria-live="polite"></div><button class="button button-primary" type="submit">Tạo phương án mới <span>↗</span></button></form>';
+  let body = '<form data-form="replan">' + replanCompletedItems() + '<section class="replan-disruption" aria-labelledby="replan-disruption-heading"><div class="replan-section-heading"><span class="replan-section-index" aria-hidden="true">2</span><h3 id="replan-disruption-heading">Điều gì đã thay đổi?</h3></div><p class="replan-section-hint">Thông tin này giúp PinkTrip sắp xếp lại phần lịch trình còn lại.</p><div class="field"><label for="replan-type">Thay đổi</label><select id="replan-type" data-replan-field="type">' + typeOptions + '</select></div><div class="field"><label for="replan-day">Ngày bị ảnh hưởng</label><select id="replan-day" data-replan-field="dayIndex">' + (state.generated?.itinerary || []).map((day, index) => '<option value="' + index + '" ' + (index === Number(draft.dayIndex) ? 'selected' : '') + '>Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</option>').join('') + '</select></div>' + replanOptions() + '</section><div class="field"><label for="replan-note">Ghi chú thêm <span class="optional">(không bắt buộc)</span></label><textarea id="replan-note" data-replan-field="note" placeholder="Ví dụ: Ưu tiên nghỉ ngơi và tránh di chuyển xa"></textarea></div><div class="error-message" id="replan-error" aria-live="polite"></div><button class="button button-primary" type="submit">Tạo phương án mới <span>↗</span></button></form>';
   if (state.replanPreview) {
     const changes = state.replanPreview.changes || [];
-    body = '<div class="replan-preview"><div class="preview-intro"><strong>Phương án dựa trên lịch trình hiện tại</strong><span>PinkTrip giữ nguyên những hoạt động đã hoàn thành và chỉ sắp xếp phần còn lại.</span></div><div class="change-summary"><h3>Thay đổi dự kiến</h3>' + changes.map((change) => '<div class="change-row"><span class="change-icon" aria-hidden="true">' + (change.kind === 'removed' ? '!' : change.kind === 'moved' ? '↗' : change.kind === 'time' ? '◷' : '✓') + '</span><span>' + escapeHtml(change.title) + ': ' + (change.kind === 'removed' ? (change.reason === 'unavailable' ? 'địa điểm không còn hoạt động' : change.reason === 'skipped' ? 'bỏ qua theo yêu cầu' : 'chưa có chỗ phù hợp') : change.kind === 'moved' ? 'Ngày ' + (change.fromDay + 1) + ' → Ngày ' + (change.toDay + 1) : change.kind === 'time' ? (change.fromTime || '') + ' → ' + change.toTime : 'giữ nguyên') + '</span></div>').join('') + '</div><div class="preview-budget"><span>Ngân sách dự kiến sau điều chỉnh</span><strong>' + money(state.replanPreview.budget?.total) + '</strong><small>' + money(state.replanPreview.budget?.perPerson) + ' mỗi người</small></div><div class="preview-itinerary"><h3>Lịch trình xem trước</h3>' + (state.replanPreview.days || []).map(readonlyDay).join('') + '</div><div class="preview-actions"><button class="button button-ghost" type="button" data-action="cancel-replan">Giữ lịch trình hiện tại</button><button class="button button-primary" type="button" data-action="apply-replan">Áp dụng lịch trình mới</button></div></div>';
+    const protectedItems = currentItems().filter(({ item }) => draft.completedItemIds.includes(item.id));
+    const protectedIds = new Set(protectedItems.map(({ item }) => item.id));
+    const protectedSummary = protectedItems.length ? '<section class="protected-summary" aria-labelledby="protected-summary-heading"><div><span class="protected-summary-icon" aria-hidden="true">✓</span><h3 id="protected-summary-heading">Được giữ nguyên</h3></div><p>' + protectedItems.map(({ item }) => escapeHtml(item.title)).join(' · ') + '</p></section>' : '';
+    body = '<div class="replan-preview"><div class="preview-intro"><strong>Phương án dựa trên lịch trình hiện tại</strong><span>PinkTrip giữ nguyên những hoạt động đã hoàn thành và chỉ sắp xếp phần còn lại.</span></div>' + protectedSummary + '<div class="change-summary"><h3>Thay đổi dự kiến</h3>' + changes.map((change) => '<div class="change-row"><span class="change-icon" aria-hidden="true">' + (change.kind === 'removed' ? '!' : change.kind === 'moved' ? '↗' : change.kind === 'time' ? '◷' : '✓') + '</span><span>' + escapeHtml(change.title) + ': ' + (change.kind === 'removed' ? (change.reason === 'unavailable' ? 'địa điểm không còn hoạt động' : change.reason === 'skipped' ? 'bỏ qua theo yêu cầu' : 'chưa có chỗ phù hợp') : change.kind === 'moved' ? 'Ngày ' + (change.fromDay + 1) + ' → Ngày ' + (change.toDay + 1) : change.kind === 'time' ? (change.fromTime || '') + ' → ' + change.toTime : 'giữ nguyên') + '</span></div>').join('') + '</div><div class="preview-budget"><span>Ngân sách dự kiến sau điều chỉnh</span><strong>' + money(state.replanPreview.budget?.total) + '</strong><small>' + money(state.replanPreview.budget?.perPerson) + ' mỗi người</small></div><div class="preview-itinerary"><h3>Lịch trình xem trước</h3>' + (state.replanPreview.days || []).map((day, index) => readonlyDay(day, index, protectedIds)).join('') + '</div><div class="preview-actions"><button class="button button-ghost" type="button" data-action="cancel-replan">Giữ lịch trình hiện tại</button><button class="button button-primary" type="button" data-action="apply-replan">Áp dụng lịch trình mới</button></div></div>';
   }
   $('#modal-root').innerHTML = '<div class="modal-backdrop replan-backdrop"><section class="modal replan-modal" role="dialog" aria-modal="true" aria-labelledby="replan-title"><button class="modal-close" type="button" data-action="close-replan" aria-label="Đóng cửa sổ">×</button><div class="kicker">ĐIỀU CHỈNH LỊCH TRÌNH</div><h2 id="replan-title">Có thay đổi trong chuyến đi?</h2><p>' + (state.replanPreview ? 'Xem lại đề xuất trước khi áp dụng vào lịch trình hiện tại.' : 'Cho PinkTrip biết điều gì xảy ra. Phương án sẽ chỉ thay đổi phần còn lại.') + '</p>' + body + '</section></div>';
 }
@@ -959,6 +1180,15 @@ async function handleAction(target) {
   if (action === 'close-review-modal') return closeReviewModal();
   if (action === 'close-place-reviews') return closePlaceReviews();
   if (action === 'apply-replan') return applyReplan();
+  if (action === 'jump-itinerary-day') return jumpToItineraryDay(target.dataset.workspace, target.dataset.dayIndex);
+  if (action === 'jump-itinerary-overview') return jumpToItineraryOverview(target.dataset.workspace);
+  if (action === 'set-itinerary-view') {
+    state.itineraryView = target.dataset.view === 'compact' ? 'compact' : 'detailed';
+    return renderPlanner();
+  }
+  if (action === 'reset-itinerary') return openResetConfirmation();
+  if (action === 'cancel-reset-itinerary') return closeResetConfirmation();
+  if (action === 'confirm-reset-itinerary') return confirmResetItinerary();
   if (['login', 'register', 'logout', 'new-trip'].includes(action) && $('#mobile-nav').classList.contains('is-open')) setMenu(false);
   if (action === 'login' || action === 'register') return openAuth(action);
   if (action === 'new-trip') return startNewTrip(target.dataset.id);
@@ -1002,14 +1232,32 @@ async function handleAction(target) {
   if (action === 'toggle-place' || action === 'add-stop') {
     const id = target.dataset.id;
     state.draft.selectedPlaceIds = state.draft.selectedPlaceIds.includes(id) ? state.draft.selectedPlaceIds.filter((item) => item !== id) : [...state.draft.selectedPlaceIds, id];
+    if (action === 'toggle-place') state.draft.stepTwoPlaceIds = (state.draft.stepTwoPlaceIds || []).includes(id) ? state.draft.stepTwoPlaceIds.filter((item) => item !== id) : [...(state.draft.stepTwoPlaceIds || []), id];
     if (action === 'add-stop') return generate();
+    return renderPlanner();
+  }
+  if (action === 'add-inspiration') {
+    const result = state.inspirationResolution;
+    if (!result?.place || !result?.mapping) return;
+    if (!(state.draft.inspirationItems || []).some((item) => item.placeId === result.place.id)) {
+      state.draft.inspirationItems = [...(state.draft.inspirationItems || []), { mappingId: result.mapping.id, placeId: result.place.id, sourceUrl: result.normalizedUrl, platform: result.mapping.platform }];
+      if (!state.draft.selectedPlaceIds.includes(result.place.id)) state.draft.selectedPlaceIds = [...state.draft.selectedPlaceIds, result.place.id];
+    }
+    state.inspirationResolution = null;
+    state.inspirationInput = '';
+    return renderPlanner();
+  }
+  if (action === 'remove-inspiration') {
+    const item = (state.draft.inspirationItems || []).find((entry) => entry.mappingId === target.dataset.id);
+    state.draft.inspirationItems = (state.draft.inspirationItems || []).filter((entry) => entry.mappingId !== target.dataset.id);
+    if (item && !(state.draft.stepTwoPlaceIds || []).includes(item.placeId)) state.draft.selectedPlaceIds = state.draft.selectedPlaceIds.filter((id) => id !== item.placeId);
     return renderPlanner();
   }
   if (action === 'next-step') {
     if (!state.draft.title || state.draft.endDate < state.draft.startDate) return toast('Hãy kiểm tra tên chuyến đi và ngày đi');
     if (state.step === 1 && !state.draft.selectedPlaceIds.length) return toast('Hãy chọn ít nhất một địa điểm để tạo lịch trình');
     state.step += 1;
-    if (state.step === 2) return state.generated && state.generatedSignature === draftSignature() ? renderPlanner() : generate();
+    if (state.step === 3) return state.generated && state.generatedSignature === draftSignature() ? renderPlanner() : generate();
     return renderPlanner();
   }
   if (action === 'prev-step') {
@@ -1049,12 +1297,9 @@ async function handleAction(target) {
     const item = state.generated.itinerary[day]?.items[index];
     const candidate = clone(state.generated.itinerary);
     candidate[day].items.splice(index, 1);
-    const oldSelected = [...state.draft.selectedPlaceIds];
-    if (item?.placeId) state.draft.selectedPlaceIds = oldSelected.filter((id) => id !== item.placeId);
     try {
-      await normalizeEditor(candidate, state.draft.selectedPlaceIds);
+      await normalizeEditor(candidate);
     } catch (error) {
-      state.draft.selectedPlaceIds = oldSelected;
       toast(error.message);
     }
   }
@@ -1100,10 +1345,24 @@ document.addEventListener('input', (event) => {
   const itemField = target.dataset.itemField;
   if (itemField && state.generated) {
     const item = state.generated.itinerary[Number(target.dataset.day)]?.items.find((entry) => entry.id === target.dataset.item);
-    if (item) updateItemField(item, itemField, target.value);
+    if (item) {
+      updateItemField(item, itemField, target.value);
+      scheduleEditorNormalization();
+    }
   }
   const replanField = target.dataset.replanField;
   if (replanField && state.replanDraft) state.replanDraft[replanField] = replanField === 'dayIndex' || replanField === 'delayMinutes' ? Number(target.value) : target.value;
+  if (target.dataset.inspirationUrl !== undefined) {
+    state.inspirationInput = target.value;
+    const submit = target.closest('form')?.querySelector('[data-inspiration-submit]');
+    const valid = isSupportedUrlShape(target.value);
+    if (submit) submit.disabled = !valid;
+    const validation = target.closest('.inspiration-panel')?.querySelector('#inspiration-validation');
+    if (validation) {
+      validation.hidden = !target.value || valid;
+      validation.textContent = valid || !target.value ? '' : 'Vui lòng dán một đường link hợp lệ.';
+    }
+  }
 });
 
 document.addEventListener('change', (event) => {
@@ -1120,6 +1379,9 @@ document.addEventListener('change', (event) => {
     state.draft[field] = target.type === 'number' ? Number(target.value) : target.value;
     if (field === 'destinationId') {
       state.draft.selectedPlaceIds = [];
+      state.draft.stepTwoPlaceIds = [];
+      state.draft.inspirationItems = [];
+      state.inspirationResolution = null;
       state.placeSearch = '';
       state.placeVisibleCount = 12;
     }
@@ -1136,8 +1398,8 @@ document.addEventListener('change', (event) => {
   }
   const itemField = target.dataset.itemField;
   if (itemField && state.generated) {
-    const item = state.generated.itinerary[Number(target.dataset.day)]?.items.find((entry) => entry.id === target.dataset.item);
-    if (item) updateItemField(item, itemField, target.value);
+    scheduleEditorNormalization(0);
+    return;
   }
   if (target.dataset.action === 'move-item-to-day' && target.value !== '') {
     const fromDay = Number(target.dataset.day);
@@ -1162,6 +1424,24 @@ document.addEventListener('submit', async (event) => {
   if (!form.dataset.form) return;
   event.preventDefault();
   if (form.dataset.form === 'replan') return submitReplan();
+  if (form.dataset.form === 'inspiration') {
+    const url = new FormData(form).get('url');
+    state.inspirationInput = String(url || '');
+    if (!isSupportedUrlShape(url)) {
+      state.inspirationResolution = { status: 'error', message: 'Vui lòng dán một đường link hợp lệ.' };
+      renderPlanner();
+      return;
+    }
+    state.inspirationResolution = { status: 'loading' };
+    renderPlanner();
+    try {
+      state.inspirationResolution = await api('/api/inspiration/resolve', { method: 'POST', body: { url, destinationId: state.draft.destinationId } });
+    } catch (error) {
+      state.inspirationResolution = { status: 'error', message: error.message };
+    }
+    renderPlanner();
+    return;
+  }
   const data = Object.fromEntries(new FormData(form));
   if (form.dataset.form === 'auth') {
     try {
@@ -1229,7 +1509,8 @@ function closeAuth() {
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     if ($('#mobile-nav').classList.contains('is-open')) setMenu(false);
-    if (state.replanOpen) closeReplan();
+    if (state.resetConfirmOpen) closeResetConfirmation();
+    else if (state.replanOpen) closeReplan();
     else if (state.reviewModalOpen) closeReviewModal();
     else if (state.reviewDetail) closePlaceReviews();
     else if ($('#modal-root').children.length) closeAuth();
@@ -1263,6 +1544,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 window.addEventListener('popstate', () => applyRoute({ scroll: false }));
+window.addEventListener('scroll', scheduleItineraryScrollSync, { passive: true });
 
 async function boot() {
   try {

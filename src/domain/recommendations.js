@@ -21,7 +21,6 @@ function scorePlace(place, { interests = [], budgetPerStop = Infinity, intensity
   const interestSet = new Set(interests.map(normalizeCategory));
   let score = 0;
   if (categoriesFor(place).some((category) => interestSet.has(category))) score += 5;
-  if (place.hiddenGem) score += 2;
   if (place.estimatedCost <= budgetPerStop) score += 2;
   if (intensity === 'relaxed' && place.category === 'wellness') score += 2;
   if (intensity === 'packed' && place.recommendedDurationMinutes <= 120) score += 1;
