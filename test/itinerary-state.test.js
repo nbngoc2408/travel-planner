@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createBaseline, restoreBaseline, itineraryPlaceIds } = require('../public/itinerary-state');
-const { recalculateItinerary, moveItineraryItem } = require('../src/domain/itinerary');
+const { createBaseline, restoreBaseline, itineraryPlaceIds, summarizeDay, summarizeItinerary } = require('../public/itinerary-state');
+const { recalculateItinerary, moveItineraryItem, replanItinerary } = require('../src/domain/itinerary');
 
 function sampleDays() {
   return [
@@ -48,4 +48,36 @@ test('a saved or applied-replan version can become the next reset baseline witho
   assert.equal(restoreBaseline(first).itinerary[0].items[0].durationMinutes, 120);
   assert.equal(restoreBaseline(nextBaseline).itinerary[0].items[0].durationMinutes, 150);
   assert.equal(restoreBaseline(nextBaseline).itinerary[0].items.length, 3);
+});
+
+test('daily summaries derive count, route, and time range from current activities', () => {
+  const summary = summarizeDay({ items: [{ title: 'Bãi Thùng', startTime: '11:45', endTime: '14:45' }] });
+  assert.equal(summary.count, 1);
+  assert.equal(summary.hasActivities, true);
+  assert.equal(summary.route, 'Bãi Thùng');
+  assert.equal(summary.routeLabel, 'Lộ trình');
+  assert.equal(summary.timeRange, '11:45–14:45');
+
+  const empty = summarizeDay({ items: [] });
+  assert.equal(empty.count, 0);
+  assert.equal(empty.hasActivities, false);
+  assert.equal(empty.route, '');
+  assert.equal(empty.timeRange, '');
+});
+
+test('navigation summaries update immediately after cross-day move, remove, reset, and replan', () => {
+  const baselineDays = sampleDays();
+  const moved = moveItineraryItem(baselineDays, { fromDayIndex: 0, itemIndex: 0, toDayIndex: 1, intensity: 'balanced' });
+  assert.deepEqual(summarizeItinerary(moved).days.map((day) => day.count), [2, 2]);
+
+  const removed = moved.map((day) => ({ ...day, items: [...day.items] }));
+  removed[0].items.shift();
+  assert.deepEqual(summarizeItinerary(removed).days.map((day) => day.count), [1, 2]);
+
+  const restored = restoreBaseline(createBaseline({ itinerary: baselineDays }));
+  assert.deepEqual(summarizeItinerary(restored.itinerary).days.map((day) => day.count), [3, 1]);
+
+  const replanned = replanItinerary({ days: baselineDays, intensity: 'balanced', disruption: { type: 'skip', dayIndex: 0, itemId: baselineDays[0].items[0].id } });
+  assert.deepEqual(summarizeItinerary(replanned.days).days.map((day) => day.count), [2, 1]);
+  assert.equal(summarizeItinerary(replanned.days).activityCount, 3);
 });

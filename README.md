@@ -77,11 +77,11 @@ Step 2 applies interest filters across all compatible categories, supports a nam
 
 ## Itinerary workspace UX
 
-The itinerary is intentionally structured as an overview followed by daily detail, rather than one continuous editable list. The overview shows trip dates, travelers, pace, stop count, average stops per active day, budget, and a horizontally scrollable summary of every day. Each day summary names the planned stops and the area sequence already present in PinkTrip's place data. A sticky day navigator makes 2–10-day schedules quick to inspect on both desktop and mobile, while a compact mode removes editing controls until the user asks for detail again.
+The itinerary is intentionally structured as an overview followed by daily detail, rather than one continuous editable list. The overview shows trip dates, travelers, pace, activity count, average activities per active day, budget, and a horizontally scrollable summary of every day. Every itinerary item is a place/experience activity; implicit travel gaps are not counted. A day's count, time range, and route cue are derived from its current `items` array, so a non-empty day cannot show an empty route state. A sticky day navigator makes 2–10-day schedules quick to inspect on both desktop and mobile, while a compact mode removes editing controls until the user asks for detail again.
 
 The implementation was informed by focused research before the redesign: Wanderlog documents separate daily-itinerary and map/route views, and TripIt emphasizes one consolidated itinerary; both support the choice to make overall trip shape visible before detail. NN/g's guidance on in-page links and sticky headers informed the current-location day chips, anchors with scroll offsets, and restrained persistent utility controls. Sources: [Wanderlog Help Center](https://help.wanderlog.com/hc/en-us), [TripIt](https://www.tripit.com/web/free), and [NN/g on in-page links](https://www.nngroup.com/articles/in-page-links/).
 
-PinkTrip does not currently store coordinates, addresses, or map geometry for its canonical places, and has no map runtime. We therefore rejected a decorative or guessed map, as it would misrepresent the data. The area-route summaries are connected to the actual scheduled items and offer a truthful lightweight geographic cue. We also rejected a permanently expanded dashboard of statistics and a separate nested itinerary navigation: the compact overview, one sticky day strip, and progressive detail keep the workspace readable.
+PinkTrip does not currently store coordinates, addresses, or map geometry for its canonical places, and has no map runtime. We therefore rejected a decorative or guessed map, as it would misrepresent the data. The area-route summaries are connected to the actual scheduled items and offer a truthful lightweight geographic cue; if area metadata is missing, the activity names form a transparent fallback route. We also rejected a permanently expanded dashboard of statistics and a separate nested itinerary navigation: the compact overview, one sticky day strip, and progressive detail keep the workspace readable.
 
 ### Timeline and reset semantics
 
@@ -113,6 +113,12 @@ The public review browser uses `GET /api/reviews` with optional `destinationId`,
 6. Add/remove stops, reorder items, change start time and duration.
 7. Save, reopen, edit or delete a personal trip.
 8. Browse local services, inspect place ratings in Step 2, and leave a destination or place-specific review.
+
+### Step 1 input behavior
+
+Step 1 uses an application-controlled date-range picker rather than browser-native date inputs. Dates remain canonical `YYYY-MM-DD` values in draft and plan JSON, while the UI shows `DD/MM/YYYY`, highlights today and the selected range, supports month navigation and keyboard focus, and derives the inclusive trip duration (`N ngày · N-1 đêm`) without storing a duplicate duration field. Selecting a date before the current start intelligently begins a new range instead of leaving an invalid end date.
+
+The trip budget is an optional numeric VND target. The controlled text input accepts digit entry and common separators (`4000000`, `4.000.000`, `4,000,000`), presents a readable `4.000.000` value with an integrated `₫`/`VND` treatment, shows a derived per-person target when travelers are known, and sends only an integer `targetBudget` to the API. Negative, mixed-text and unsafe oversized values are rejected with Vietnamese field errors; blank or zero explicitly means no budget target, matching the existing budget domain rule.
 
 ## Prototype tradeoffs
 

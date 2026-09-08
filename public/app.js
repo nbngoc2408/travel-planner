@@ -39,15 +39,24 @@ const state = {
   inspirationInput: '',
   itineraryView: 'detailed',
   activeItineraryDay: 0,
+  datePickerOpen: false,
+  datePickerMonth: null,
+  datePickerPhase: 'start',
+  budgetInputValue: null,
+  budgetInputError: '',
   toastTimer: null
 };
 
 const $ = (selector) => document.querySelector(selector);
-const money = (value) => new Intl.NumberFormat('vi-VN').format(Math.round(value || 0)) + 'đ';
+const plannerInputs = window.PinkTripPlannerInputs;
+const money = (value) => new Intl.NumberFormat('vi-VN').format(Math.round(value || 0)) + ' ₫';
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
-const formatDate = (value) => new Intl.DateTimeFormat('vi-VN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(value + 'T00:00:00'));
+const formatDate = (value) => {
+  if (!plannerInputs?.isDate(value)) return 'Chưa rõ ngày';
+  return new Intl.DateTimeFormat('vi-VN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(new Date(value + 'T00:00:00Z'));
+};
 const intensityLabel = (value) => ({ relaxed: 'Thảnh thơi', balanced: 'Cân bằng', packed: 'Nhiều trải nghiệm' }[value] || 'Cân bằng');
-const dateValue = (date) => date.toISOString().slice(0, 10);
+const dateValue = (date) => plannerInputs.canonicalDate(date.getFullYear(), date.getMonth() + 1, date.getDate());
 const categoryLabels = { nature: 'Thiên nhiên', beach: 'Biển', food: 'Ẩm thực', culture: 'Văn hóa', photography: 'Nhiếp ảnh', experience: 'Trải nghiệm', photo: 'Nhiếp ảnh', activity: 'Trải nghiệm' };
 let lastMenuTrigger = null;
 let lastAuthTrigger = null;
@@ -138,8 +147,200 @@ function defaultDraft(destinationId = state.destinations[0]?.id) {
   };
 }
 
+function syncBudgetInput(value = state.draft?.targetBudget) {
+  state.budgetInputValue = plannerInputs.formatBudget(value, { empty: true });
+  state.budgetInputError = '';
+}
+
+function budgetInputValue() {
+  return state.budgetInputValue === null ? plannerInputs.formatBudget(state.draft?.targetBudget, { empty: true }) : state.budgetInputValue;
+}
+
+function dateValidationMessage() {
+  if (!plannerInputs.isDate(state.draft?.startDate)) return 'Chọn ngày đi để tiếp tục.';
+  if (!plannerInputs.isDate(state.draft?.endDate)) return 'Chọn ngày về để tiếp tục.';
+  if (plannerInputs.compareDates(state.draft.endDate, state.draft.startDate) < 0) return 'Ngày về phải từ ngày đi trở đi.';
+  return '';
+}
+
+function budgetValidationMessage() {
+  if (state.budgetInputError) return state.budgetInputError;
+  const value = state.draft?.targetBudget;
+  if (value === null || value === undefined || !Number.isFinite(Number(value)) || Number(value) < 0) return 'Nhập ngân sách bằng số dương hoặc để trống nếu chưa muốn đặt mục tiêu.';
+  return '';
+}
+
+function tripDurationText() {
+  return plannerInputs.durationLabel(state.draft?.startDate, state.draft?.endDate);
+}
+
+function calendarMonthValue() {
+  return plannerInputs.monthStart(state.datePickerMonth || state.draft?.startDate || dateValue(new Date()));
+}
+
+function calendarMonthParts() {
+  return plannerInputs.parseDate(calendarMonthValue()) || plannerInputs.parseDate(dateValue(new Date()));
+}
+
+function calendarMonthLabel() {
+  const parts = calendarMonthParts();
+  return `Tháng ${parts.month}, ${parts.year}`;
+}
+
+function openDatePicker(role = 'start') {
+  state.datePickerPhase = role === 'end' ? 'end' : 'start';
+  state.datePickerMonth = plannerInputs.monthStart(role === 'end' ? (state.draft.endDate || state.draft.startDate) : (state.draft.startDate || state.draft.endDate || dateValue(new Date())));
+  state.datePickerOpen = true;
+  renderPlanner();
+  requestAnimationFrame(() => document.querySelector('.calendar-day[aria-current="date"], .calendar-day.is-selected')?.focus());
+}
+
+function closeDatePicker(restoreFocus = false) {
+  if (!state.datePickerOpen) return;
+  const active = document.activeElement;
+  const focusRole = active?.dataset?.dateRole || state.datePickerPhase || 'start';
+  state.datePickerOpen = false;
+  renderPlanner();
+  if (restoreFocus) document.querySelector('[data-action="open-date-picker"][data-date-role="' + focusRole + '"]')?.focus();
+}
+
+function selectDate(value) {
+  if (!plannerInputs.isDate(value)) return;
+  if (state.datePickerPhase === 'end' && plannerInputs.isDate(state.draft.startDate)) {
+    if (plannerInputs.compareDates(value, state.draft.startDate) < 0) {
+      state.draft.startDate = value;
+      state.draft.endDate = '';
+      state.datePickerPhase = 'end';
+    } else {
+      state.draft.endDate = value;
+      state.datePickerPhase = 'start';
+    }
+  } else {
+    state.draft.startDate = value;
+    if (state.draft.endDate && plannerInputs.compareDates(state.draft.endDate, value) < 0) state.draft.endDate = '';
+    state.datePickerPhase = 'end';
+  }
+  state.datePickerMonth = plannerInputs.monthStart(value);
+  if (state.draft.startDate && state.draft.endDate && !dateValidationMessage()) state.datePickerOpen = false;
+  renderPlanner();
+}
+
+function moveCalendarMonth(offset) {
+  const parts = calendarMonthParts();
+  const month = new Date(Date.UTC(parts.year, parts.month - 1 + Number(offset), 1));
+  state.datePickerMonth = plannerInputs.canonicalDate(month.getUTCFullYear(), month.getUTCMonth() + 1, 1);
+  renderPlanner();
+  requestAnimationFrame(() => document.querySelector('.calendar-day.is-selected, .calendar-day')?.focus());
+}
+
+function calendarDates() {
+  const parts = calendarMonthParts();
+  const first = plannerInputs.canonicalDate(parts.year, parts.month, 1);
+  const firstWeekday = new Date(Date.UTC(parts.year, parts.month - 1, 1)).getUTCDay();
+  const mondayOffset = (firstWeekday + 6) % 7;
+  return Array.from({ length: 42 }, (_, index) => plannerInputs.addDays(first, index - mondayOffset));
+}
+
+function renderCalendar() {
+  const start = state.draft.startDate;
+  const end = state.draft.endDate;
+  const today = dateValue(new Date());
+  const weekdayLabels = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'];
+  const days = calendarDates();
+  const dayButtons = days.map((value) => {
+    const parts = plannerInputs.parseDate(value);
+    const currentMonth = parts.month === calendarMonthParts().month;
+    const isStart = value === start;
+    const isEnd = value === end;
+    const inRange = start && end && plannerInputs.compareDates(value, start) >= 0 && plannerInputs.compareDates(value, end) <= 0;
+    const classes = ['calendar-day'];
+    if (!currentMonth) classes.push('is-muted');
+    if (value === today) classes.push('is-today');
+    if (inRange) classes.push('is-in-range');
+    if (isStart) classes.push('is-start');
+    if (isEnd) classes.push('is-end');
+    const stateLabel = isStart && isEnd ? 'Ngày đi và ngày về' : isStart ? 'Ngày đi' : isEnd ? 'Ngày về' : inRange ? 'Trong khoảng chuyến đi' : '';
+    return '<button class="' + classes.join(' ') + '" type="button" data-action="select-date" data-date="' + value + '" aria-label="' + escapeHtml(plannerInputs.formatDisplayDate(value) + (stateLabel ? ' · ' + stateLabel : '')) + '" ' + (value === today ? 'aria-current="date" ' : '') + (isStart || isEnd ? 'aria-pressed="true"' : '') + '>' + parts.day + '</button>';
+  }).join('');
+  return '<div class="date-picker-popover" role="dialog" aria-label="Chọn khoảng ngày" data-date-picker><div class="date-picker-summary"><div><span>Ngày đi</span><strong>' + escapeHtml(plannerInputs.formatDisplayDate(start) || 'Chưa chọn') + '</strong></div><span class="date-picker-arrow" aria-hidden="true">→</span><div><span>Ngày về</span><strong>' + escapeHtml(plannerInputs.formatDisplayDate(end) || 'Chưa chọn') + '</strong></div></div><div class="calendar-header"><button class="icon-button" type="button" data-action="date-prev-month" aria-label="Tháng trước">←</button><strong aria-live="polite">' + calendarMonthLabel() + '</strong><button class="icon-button" type="button" data-action="date-next-month" aria-label="Tháng sau">→</button></div><div class="calendar-weekdays" aria-hidden="true">' + weekdayLabels.map((label) => '<span>' + label + '</span>').join('') + '</div><div class="calendar-grid" role="grid" aria-label="Lịch ' + escapeHtml(calendarMonthLabel()) + '">' + dayButtons + '</div><div class="calendar-footer"><span><i class="calendar-legend-dot"></i> Hôm nay</span><span>' + (state.datePickerPhase === 'end' ? 'Chọn ngày về' : 'Chọn ngày đi') + '</span><button class="text-button" type="button" data-action="close-date-picker">Đóng</button></div></div>';
+}
+
+function renderDateRangeControl() {
+  const start = state.draft.startDate;
+  const end = state.draft.endDate;
+  const dateError = dateValidationMessage();
+  const duration = tripDurationText();
+  const open = state.datePickerOpen;
+  const startLabel = plannerInputs.formatDisplayDate(start) || 'Chọn ngày đi';
+  const endLabel = plannerInputs.formatDisplayDate(end) || 'Chọn ngày về';
+  return '<div class="field date-range-field field-span' + (dateError ? ' has-error' : '') + '"><div class="date-range-heading"><label id="trip-dates-label">Thời gian chuyến đi</label><span class="field-optional">Chọn một khoảng ngày</span></div><div class="date-range-inputs"><button class="date-trigger ' + (start ? 'has-value' : '') + '" type="button" data-action="open-date-picker" data-date-role="start" aria-label="Ngày đi: ' + escapeHtml(startLabel) + '" aria-expanded="' + open + '" aria-controls="trip-date-picker"><span class="date-trigger-label">Ngày đi</span><strong>' + escapeHtml(startLabel) + '</strong><span class="date-trigger-icon" aria-hidden="true">▦</span></button><span class="date-range-arrow" aria-hidden="true">→</span><button class="date-trigger ' + (end ? 'has-value' : '') + '" type="button" data-action="open-date-picker" data-date-role="end" aria-label="Ngày về: ' + escapeHtml(endLabel) + '" aria-expanded="' + open + '" aria-controls="trip-date-picker"><span class="date-trigger-label">Ngày về</span><strong>' + escapeHtml(endLabel) + '</strong><span class="date-trigger-icon" aria-hidden="true">▦</span></button></div><div class="date-range-meta" aria-live="polite"><strong>' + escapeHtml(duration || 'Chọn đủ hai ngày để xem thời lượng') + '</strong><span>' + (duration ? 'Khoảng thời gian được tính tự động' : 'Ngày về có thể trùng ngày đi cho chuyến trong ngày') + '</span></div>' + (dateError ? '<p class="field-error" id="trip-date-error" role="alert">' + escapeHtml(dateError) + '</p>' : '') + (open ? renderCalendar().replace('data-date-picker', 'id="trip-date-picker" data-date-picker') : '') + '</div>';
+}
+
+function renderBudgetControl() {
+  const error = budgetValidationMessage();
+  const target = Number(state.draft.targetBudget) || 0;
+  const travelers = Math.max(1, Number(state.draft.travelers) || 1);
+  const perPerson = target ? Math.round(target / travelers) : 0;
+  return '<div class="field budget-field' + (error ? ' has-error' : '') + '"><label for="trip-budget">Ngân sách chuyến đi <span class="optional">(không bắt buộc)</span></label><div class="budget-input-wrap"><span class="budget-prefix" aria-hidden="true">₫</span><input id="trip-budget" type="text" inputmode="numeric" autocomplete="off" data-budget-input data-draft="targetBudget" value="' + escapeHtml(budgetInputValue()) + '" placeholder="4.000.000" aria-describedby="trip-budget-help trip-budget-person trip-budget-error" ' + (error ? 'aria-invalid="true"' : '') + '><span class="budget-currency" aria-hidden="true">VND</span></div><small class="field-hint" id="trip-budget-help">Tổng ngân sách mục tiêu cho cả chuyến. Để trống hoặc nhập 0 nếu bạn chưa muốn đặt mục tiêu.</small><small class="budget-per-person" id="trip-budget-person">' + (perPerson ? '≈ ' + money(perPerson) + ' / người · ' + travelers + ' người' : 'Ngân sách này là mục tiêu của cả chuyến, không phải chi phí ước tính.') + '</small><p class="field-error" id="trip-budget-error" role="alert" ' + (error ? '' : 'hidden') + '>' + escapeHtml(error) + '</p></div>';
+}
+
+function updateBudgetPerPersonText() {
+  const target = Number(state.draft.targetBudget) || 0;
+  const travelers = Math.max(1, Number(state.draft.travelers) || 1);
+  const element = $('#trip-budget-person');
+  if (element) element.textContent = target ? '≈ ' + money(Math.round(target / travelers)) + ' / người · ' + travelers + ' người' : 'Ngân sách này là mục tiêu của cả chuyến, không phải chi phí ước tính.';
+}
+
+function updateBudgetErrorState() {
+  const field = $('.budget-field');
+  const input = $('#trip-budget');
+  const error = $('#trip-budget-error');
+  const message = budgetValidationMessage();
+  field?.classList.toggle('has-error', Boolean(message));
+  if (input) {
+    input.setAttribute('aria-invalid', message ? 'true' : 'false');
+    input.setAttribute('aria-describedby', 'trip-budget-help trip-budget-person trip-budget-error');
+  }
+  if (error) {
+    error.hidden = !message;
+    error.textContent = message;
+  }
+}
+
+function handleBudgetInput(target) {
+  const before = target.value;
+  const caret = Number.isInteger(target.selectionStart) ? target.selectionStart : before.length;
+  const digitsBeforeCaret = before.slice(0, caret).replace(/\D/g, '').length;
+  const normalized = plannerInputs.normalizeBudgetInput(before);
+  state.budgetInputError = normalized.error;
+  if (!normalized.error) {
+    state.draft.targetBudget = normalized.value;
+    state.budgetInputValue = normalized.display;
+    const nextValue = normalized.display;
+    target.value = nextValue;
+    let nextCaret = nextValue.length;
+    if (digitsBeforeCaret < normalized.digits.length) {
+      let seen = 0;
+      nextCaret = 0;
+      while (nextCaret < nextValue.length && seen < digitsBeforeCaret) {
+        if (/\d/.test(nextValue[nextCaret])) seen += 1;
+        nextCaret += 1;
+      }
+    }
+    target.setSelectionRange(nextCaret, nextCaret);
+  } else {
+    state.budgetInputValue = before;
+  }
+  updateBudgetPerPersonText();
+  updateBudgetErrorState();
+}
+
+function renderStepOne() {
+  return '<div class="step-panel"><h3>Chuyến đi này có gì đặc biệt?</h3><p>Cho PinkTrip biết vài điều cơ bản để bắt đầu sắp xếp.</p><div class="form-grid"><div class="field"><label for="trip-title">Tên chuyến đi</label><input id="trip-title" data-draft="title" value="' + escapeHtml(state.draft.title) + '" placeholder="Ví dụ: Cuối tuần ở biển"></div><div class="field"><label for="trip-destination">Điểm đến</label><select id="trip-destination" data-draft="destinationId">' + state.destinations.map((item) => '<option value="' + item.id + '" ' + (item.id === state.draft.destinationId ? 'selected' : '') + '>' + escapeHtml(item.name) + ' · ' + escapeHtml(item.province) + '</option>').join('') + '</select></div>' + renderDateRangeControl() + '<div class="field"><label for="trip-travelers">Số người</label><input id="trip-travelers" type="number" min="1" max="12" inputmode="numeric" data-draft="travelers" value="' + escapeHtml(state.draft.travelers) + '"><small class="field-hint">Từ 1 đến 12 người</small></div>' + renderBudgetControl() + '<div class="field"><label for="trip-intensity">Nhịp điệu</label><select id="trip-intensity" data-draft="intensity"><option value="relaxed" ' + (state.draft.intensity === 'relaxed' ? 'selected' : '') + '>Thảnh thơi</option><option value="balanced" ' + (state.draft.intensity === 'balanced' ? 'selected' : '') + '>Cân bằng</option><option value="packed" ' + (state.draft.intensity === 'packed' ? 'selected' : '') + '>Nhiều trải nghiệm</option></select></div></div></div>';
+}
+
 function draftSignature() {
-  return JSON.stringify({ destinationId: state.draft.destinationId, startDate: state.draft.startDate, endDate: state.draft.endDate, intensity: state.draft.intensity, selectedPlaceIds: [...(state.draft.selectedPlaceIds || [])].sort(), inspirationItems: (state.draft.inspirationItems || []).map((item) => item.mappingId).sort() });
+  return JSON.stringify({ destinationId: state.draft.destinationId, startDate: state.draft.startDate, endDate: state.draft.endDate, travelers: Number(state.draft.travelers) || 1, targetBudget: Number(state.draft.targetBudget) || 0, intensity: state.draft.intensity, selectedPlaceIds: [...(state.draft.selectedPlaceIds || [])].sort(), inspirationItems: (state.draft.inspirationItems || []).map((item) => item.mappingId).sort() });
 }
 
 function parseRoute(path = window.location.pathname, search = window.location.search) {
@@ -261,12 +462,13 @@ function timelineTime(item, { editable = false, dayIndex = 0 } = {}) {
 }
 
 function readonlyDay(day, index, protectedItemIds = new Set(), workspace = '') {
-  const items = day.items || [];
+  const summary = summarizeDay(day);
+  const items = summary.items;
   const protectedIds = protectedItemIds instanceof Set ? protectedItemIds : new Set();
   const content = items.length
     ? items.map((item, itemIndex) => '<div class="timeline-item timeline-item-readonly' + (protectedIds.has(item.id) ? ' timeline-item-protected' : '') + (itemIndex < items.length - 1 ? ' has-next' : '') + '">' + timelineTime(item) + '<div class="timeline-rail" aria-hidden="true"><span></span></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + item.durationMinutes + ' phút · ' + money(item.estimatedCost) + '/người</small>' + (protectedIds.has(item.id) ? '<span class="timeline-item-status">Đã hoàn thành · giữ nguyên</span>' : '') + '</div>' + timelineGap(item, items[itemIndex + 1]) + '</div>').join('')
     : '<p class="empty-day-message">Chưa có hoạt động nào trong ngày này.</p>';
-  return '<section class="timeline-day"' + (workspace ? ' id="' + workspace + '-day-' + index + '" data-itinerary-day="' + index + '"' : '') + '><h3>NGÀY ' + (index + 1) + ' · ' + formatDate(day.date) + '</h3><p class="day-route-label">Tuyến trong ngày: ' + escapeHtml(dayRoute(day)) + '</p>' + content + '</section>';
+  return '<section class="timeline-day"' + (workspace ? ' id="' + workspace + '-day-' + index + '" data-itinerary-day="' + index + '"' : '') + '><h3>NGÀY ' + (index + 1) + ' · ' + formatDate(day.date) + '</h3>' + renderDaySummary(summary) + content + '</section>';
 }
 
 function budgetStatus(budget, targetBudget) {
@@ -285,26 +487,54 @@ function renderBudget(budget, targetBudget, days) {
 }
 
 function itineraryStats(days = []) {
-  const items = days.flatMap((day) => day.items || []);
-  const activeDays = days.filter((day) => (day.items || []).length).length;
+  const summaries = summarizeItinerary(days);
+  const items = summaries.days.flatMap((day) => day.items);
+  const activeDays = summaries.activeDays;
   const average = activeDays ? Math.round((items.length / activeDays) * 10) / 10 : 0;
-  return { items, activeDays, average };
+  return { items, activeDays, average, days: summaries.days };
+}
+
+function summarizeDay(day = {}) {
+  return window.PinkTripItineraryState.summarizeDay(day);
+}
+
+function summarizeItinerary(days = []) {
+  return window.PinkTripItineraryState.summarizeItinerary(days);
+}
+
+function activityLabel(count) {
+  return count + ' hoạt động';
 }
 
 function dayRoute(day = {}) {
-  const areas = [...new Set((day.items || []).map((item) => item.areaLabel).filter(Boolean))];
-  return areas.length ? areas.join(' → ') : 'Chưa có điểm dừng';
+  return summarizeDay(day).route;
 }
 
 function dayStops(day = {}) {
-  const titles = (day.items || []).map((item) => item.title);
-  if (!titles.length) return 'Ngày để trống';
+  const titles = summarizeDay(day).items.map((item) => item.title);
+  if (!titles.length) return '';
   return titles.slice(0, 3).join(' · ') + (titles.length > 3 ? ' · …' : '');
+}
+
+function renderDaySummary(summary) {
+  if (!summary.hasActivities) return '<p class="day-summary is-empty">Ngày này chưa có hoạt động.</p>';
+  const pieces = ['<strong>' + activityLabel(summary.count) + '</strong>'];
+  if (summary.timeRange) pieces.push('<span>' + escapeHtml(summary.timeRange) + '</span>');
+  if (summary.route) pieces.push('<span class="day-summary-route">' + escapeHtml(summary.routeLabel) + ': ' + escapeHtml(summary.route) + '</span>');
+  return '<p class="day-summary">' + pieces.join(' <span aria-hidden="true">·</span> ') + '</p>';
+}
+
+function dayOverviewSummary(summary) {
+  if (!summary.hasActivities) return 'Ngày này chưa có hoạt động';
+  return activityLabel(summary.count) + (summary.timeRange ? ' · ' + summary.timeRange : '');
 }
 
 function renderDayNavigator(days, workspace) {
   const active = Math.min(Math.max(0, Number(state.activeItineraryDay) || 0), Math.max(0, days.length - 1));
-  return '<nav class="itinerary-day-nav" aria-label="Đi tới ngày trong lịch trình"><button class="itinerary-nav-chip" type="button" data-action="jump-itinerary-overview" data-workspace="' + workspace + '">Tổng quan</button><div class="itinerary-nav-scroll">' + days.map((day, index) => '<button class="itinerary-nav-chip ' + (index === active ? 'active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '" aria-current="' + (index === active ? 'step' : 'false') + '"><span>Ngày ' + (index + 1) + '</span><small>' + (day.items || []).length + ' điểm</small></button>').join('') + '</div></nav>';
+  return '<nav class="itinerary-day-nav" aria-label="Đi tới ngày trong lịch trình"><button class="itinerary-nav-chip" type="button" data-action="jump-itinerary-overview" data-workspace="' + workspace + '">Tổng quan</button><div class="itinerary-nav-scroll">' + days.map((day, index) => {
+    const summary = summarizeDay(day);
+    return '<button class="itinerary-nav-chip ' + (index === active ? 'active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '" aria-current="' + (index === active ? 'step' : 'false') + '" aria-label="Ngày ' + (index + 1) + (summary.hasActivities ? ', ' + activityLabel(summary.count) : ', chưa có hoạt động') + '">Ngày ' + (index + 1) + '</button>';
+  }).join('') + '</div></nav>';
 }
 
 function renderItineraryActions() {
@@ -316,11 +546,11 @@ function renderItineraryOverview({ destination, startDate, endDate, travelers, i
   const intensityText = intensityLabel(intensity);
   const metrics = [
     ['Ngày đi', days.length + ' ngày'],
-    ['Điểm dừng', stats.items.length + ' điểm'],
-    ['Trung bình', stats.average + ' điểm/ngày'],
+    ['Hoạt động', activityLabel(stats.items.length)],
+    ['Trung bình', stats.average + ' hoạt động/ngày'],
     ['Ngân sách', money(budget?.total)]
   ];
-  return '<section class="itinerary-workspace" id="' + workspace + '-overview"><div class="itinerary-overview-head"><div><span class="kicker">TỔNG QUAN CHUYẾN ĐI</span><h3>' + escapeHtml(destination?.name || 'Chuyến đi của bạn') + '</h3><p>' + formatDate(startDate) + ' → ' + formatDate(endDate) + ' · ' + travelers + ' người · ' + intensityText + '</p></div><div class="itinerary-view-toggle" role="group" aria-label="Mật độ hiển thị lịch trình">' + (editable ? '<button class="view-toggle ' + (state.itineraryView === 'detailed' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="detailed" aria-pressed="' + (state.itineraryView === 'detailed') + '">Chi tiết</button><button class="view-toggle ' + (state.itineraryView === 'compact' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="compact" aria-pressed="' + (state.itineraryView === 'compact') + '">Thu gọn</button>' : '<span class="itinerary-readonly-label">Chế độ xem</span>') + '</div></div><div class="itinerary-metrics">' + metrics.map(([label, value]) => '<div><small>' + label + '</small><strong>' + value + '</strong></div>').join('') + '</div><div class="itinerary-shape" aria-labelledby="' + workspace + '-shape-heading"><div><div><span class="kicker">NHỊP ĐỘ TỪNG NGÀY</span><h4 id="' + workspace + '-shape-heading">Toàn cảnh hành trình</h4></div><p>' + (stats.activeDays ? stats.activeDays + ' ngày có lịch · ' + stats.items.length + ' điểm dừng' : 'Chưa có điểm dừng') + '</p></div><div class="day-overview-list">' + days.map((day, index) => '<button class="day-overview-card ' + (index === Math.min(Math.max(0, Number(state.activeItineraryDay) || 0), Math.max(0, days.length - 1)) ? 'active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '"><span class="day-overview-label">Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</span><strong>' + (day.items || []).length + ' điểm dừng</strong><small>' + escapeHtml(dayStops(day)) + '</small><em>' + escapeHtml(dayRoute(day)) + '</em></button>').join('') + '</div></div></section>';
+  return '<section class="itinerary-workspace" id="' + workspace + '-overview"><div class="itinerary-overview-head"><div><span class="kicker">TỔNG QUAN CHUYẾN ĐI</span><h3>' + escapeHtml(destination?.name || 'Chuyến đi của bạn') + '</h3><p>' + formatDate(startDate) + ' → ' + formatDate(endDate) + ' · ' + travelers + ' người · ' + intensityText + '</p></div><div class="itinerary-view-toggle" role="group" aria-label="Mật độ hiển thị lịch trình">' + (editable ? '<button class="view-toggle ' + (state.itineraryView === 'detailed' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="detailed" aria-pressed="' + (state.itineraryView === 'detailed') + '">Chi tiết</button><button class="view-toggle ' + (state.itineraryView === 'compact' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="compact" aria-pressed="' + (state.itineraryView === 'compact') + '">Thu gọn</button>' : '<span class="itinerary-readonly-label">Chế độ xem</span>') + '</div></div><div class="itinerary-metrics">' + metrics.map(([label, value]) => '<div><small>' + label + '</small><strong>' + value + '</strong></div>').join('') + '</div><div class="itinerary-shape" aria-labelledby="' + workspace + '-shape-heading"><div><div><span class="kicker">NHỊP ĐỘ TỪNG NGÀY</span><h4 id="' + workspace + '-shape-heading">Toàn cảnh hành trình</h4></div><p>' + (stats.activeDays ? stats.activeDays + ' ngày có lịch · ' + activityLabel(stats.items.length) : 'Chưa có hoạt động nào') + '</p></div><div class="day-overview-list">' + days.map((day, index) => { const summary = summarizeDay(day); const stops = dayStops(day); return '<button class="day-overview-card ' + (index === Math.min(Math.max(0, Number(state.activeItineraryDay) || 0), Math.max(0, days.length - 1)) ? 'active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '"><span class="day-overview-label">Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</span><strong>' + escapeHtml(dayOverviewSummary(summary)) + '</strong>' + (stops ? '<small>' + escapeHtml(stops) + '</small>' : '') + (summary.route ? '<em>' + escapeHtml(summary.routeLabel + ': ' + summary.route) + '</em>' : '') + '</button>'; }).join('') + '</div></div></section>';
 }
 
 function renderTripDetail() {
@@ -691,7 +921,7 @@ function renderInspirationStep() {
 }
 
 function timeToMinutes(value) {
-  const match = String(value || '').match(/^(\\d{1,2}):(\\d{2})$/);
+  const match = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
   return match ? Number(match[1]) * 60 + Number(match[2]) : 0;
 }
 
@@ -706,14 +936,15 @@ function updateItemField(item, field, value) {
 }
 
 function editorDay(day, dayIndex) {
-  const items = day.items || [];
+  const summary = summarizeDay(day);
+  const items = summary.items;
   const compact = state.itineraryView === 'compact';
   const itemHtml = items.map((item, index) => {
     if (compact) return '<div class="timeline-item compact-item' + (index < items.length - 1 ? ' has-next' : '') + '">' + timelineTime(item) + '<div class="timeline-rail" aria-hidden="true"><span></span></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(item.areaLabel || categoryLabels[item.category] || 'Điểm dừng') + ' · ' + item.durationMinutes + ' phút</small></div>' + timelineGap(item, items[index + 1]) + '</div>';
     const dayOptions = (state.generated?.itinerary || []).map((entry, targetIndex) => '<option value="' + targetIndex + '" ' + (targetIndex === dayIndex ? 'selected' : '') + '>Ngày ' + (targetIndex + 1) + '</option>').join('');
     return '<div class="timeline-item editable-item' + (index < items.length - 1 ? ' has-next' : '') + '" data-day="' + dayIndex + '" data-index="' + index + '">' + timelineTime(item, { editable: true, dayIndex }) + '<div class="timeline-rail" aria-hidden="true"><span></span></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + money(item.estimatedCost) + '/người</small><label class="duration-control">Thời lượng <input class="duration-input" type="number" min="30" step="15" data-item-field="durationMinutes" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + item.durationMinutes + '" aria-label="Thời lượng ' + escapeHtml(item.title) + '"> phút</label></div><div class="timeline-controls"><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="up" aria-label="Đưa ' + escapeHtml(item.title) + ' lên">↑</button><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="down" aria-label="Đưa ' + escapeHtml(item.title) + ' xuống">↓</button><select class="move-select" data-action="move-item-to-day" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Di chuyển ' + escapeHtml(item.title) + ' sang ngày khác"><option value="">Di chuyển đến…</option>' + dayOptions + '</select><button class="icon-button" type="button" data-action="remove-item" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Xóa ' + escapeHtml(item.title) + '">×</button></div>' + timelineGap(item, items[index + 1]) + '</div>';
   }).join('');
-  return '<section class="timeline-day editable-day' + (compact ? ' is-compact' : '') + '" id="editor-day-' + dayIndex + '" data-itinerary-day="' + dayIndex + '" data-drop-day="' + dayIndex + '"><h4>NGÀY ' + (dayIndex + 1) + ' · ' + formatDate(day.date) + '</h4><p class="day-route-label">Tuyến trong ngày: ' + escapeHtml(dayRoute(day)) + '</p>' + (itemHtml || '<p class="empty-day-message">Chưa có hoạt động nào trong ngày này. Bạn vẫn có thể chuyển điểm dừng vào đây.</p>') + (compact && items.length ? '<p class="compact-day-hint">Chuyển sang Chi tiết để đổi giờ, thời lượng hoặc thứ tự.</p>' : '') + '</section>';
+  return '<section class="timeline-day editable-day' + (compact ? ' is-compact' : '') + '" id="editor-day-' + dayIndex + '" data-itinerary-day="' + dayIndex + '" data-drop-day="' + dayIndex + '"><h4>NGÀY ' + (dayIndex + 1) + ' · ' + formatDate(day.date) + '</h4>' + renderDaySummary(summary) + (itemHtml || '<p class="empty-day-message">Chuyển một hoạt động từ ngày khác để bắt đầu.</p>') + (compact && items.length ? '<p class="compact-day-hint">Chuyển sang Chi tiết để đổi giờ, thời lượng hoặc thứ tự.</p>' : '') + '</section>';
 }
 
 function renderPlanner() {
@@ -729,7 +960,7 @@ function renderPlanner() {
   const nav = '<div class="planner-steps">' + ['Thông tin', 'Điểm đến', 'Cảm hứng', 'Lịch trình'].map((item, index) => '<span class="planner-step ' + (index === state.step ? 'active ' : '') + (index < state.step ? 'done' : '') + '">' + String(index + 1).padStart(2, '0') + ' ' + item + '</span>').join('') + '</div>';
   let content = '';
   if (state.step === 0) {
-    content = '<div class="step-panel"><h3>Chuyến đi này có gì đặc biệt?</h3><p>Cho PinkTrip biết vài điều cơ bản để bắt đầu sắp xếp.</p><div class="form-grid"><div class="field"><label for="trip-title">Tên chuyến đi</label><input id="trip-title" data-draft="title" value="' + escapeHtml(state.draft.title) + '" placeholder="Ví dụ: Cuối tuần ở biển"></div><div class="field"><label for="trip-destination">Điểm đến</label><select id="trip-destination" data-draft="destinationId">' + state.destinations.map((item) => '<option value="' + item.id + '" ' + (item.id === state.draft.destinationId ? 'selected' : '') + '>' + escapeHtml(item.name) + ' · ' + escapeHtml(item.province) + '</option>').join('') + '</select></div><div class="field"><label for="trip-start">Ngày bắt đầu</label><input id="trip-start" type="date" data-draft="startDate" value="' + state.draft.startDate + '"></div><div class="field"><label for="trip-end">Ngày kết thúc</label><input id="trip-end" type="date" data-draft="endDate" value="' + state.draft.endDate + '"></div><div class="field"><label for="trip-travelers">Số người</label><input id="trip-travelers" type="number" min="1" max="12" data-draft="travelers" value="' + state.draft.travelers + '"></div><div class="field"><label for="trip-budget">Ngân sách cả chuyến</label><div class="money-wrap"><input id="trip-budget" type="number" min="0" step="100000" data-draft="targetBudget" value="' + state.draft.targetBudget + '"><span>VND</span></div></div><div class="field"><label for="trip-intensity">Nhịp điệu</label><select id="trip-intensity" data-draft="intensity"><option value="relaxed" ' + (state.draft.intensity === 'relaxed' ? 'selected' : '') + '>Thảnh thơi</option><option value="balanced" ' + (state.draft.intensity === 'balanced' ? 'selected' : '') + '>Cân bằng</option><option value="packed" ' + (state.draft.intensity === 'packed' ? 'selected' : '') + '>Nhiều trải nghiệm</option></select></div></div></div>';
+    content = renderStepOne();
   } else if (state.step === 1) {
     content = renderStepTwo();
   } else if (state.step === 2) {
@@ -805,6 +1036,9 @@ function loadPlanIntoEditor(plan) {
   state.plannerOpen = true;
   state.step = 3;
   state.draft = { title: plan.title, destinationId: plan.destinationId, startDate: plan.startDate, endDate: plan.endDate, travelers: plan.travelers, targetBudget: plan.targetBudget, accommodationLevel: plan.accommodationLevel || 'comfort', intensity: plan.intensity || 'balanced', interests: plan.interests || [], selectedPlaceIds: plan.selectedPlaceIds || [], stepTwoPlaceIds: (plan.selectedPlaceIds || []).filter((id) => !(plan.inspirationItems || []).some((item) => item.placeId === id)), inspirationItems: plan.inspirationItems || [] };
+  syncBudgetInput(state.draft.targetBudget);
+  state.datePickerOpen = false;
+  state.datePickerMonth = state.draft.startDate;
   state.generated = { destination: plan.destination, itinerary: clone(plan.days || []), budget: clone(plan.budget || {}) };
   establishItineraryBaseline({ itinerary: plan.days || [], budget: plan.budget || {} });
   state.generatedSignature = draftSignature();
@@ -856,7 +1090,7 @@ async function applyRoute({ scroll = true } = {}) {
     if (route.view === 'new') {
       state.plannerOpen = true;
       state.editingPlanId = null;
-      if (previous.view !== 'new' && !state.draft.destinationId) state.draft = defaultDraft();
+      if (previous.view !== 'new' && !state.draft.destinationId) { state.draft = defaultDraft(); syncBudgetInput(state.draft.targetBudget); }
     } else if (route.view === 'home') {
       state.plannerOpen = false;
       state.generated = null;
@@ -898,6 +1132,9 @@ function startNewTrip(id) {
   state.itineraryBaseline = null;
   state.generatedSignature = null;
   state.draft = defaultDraft(id);
+  syncBudgetInput(state.draft.targetBudget);
+  state.datePickerOpen = false;
+  state.datePickerMonth = state.draft.startDate;
   state.placeSearch = '';
   state.placeVisibleCount = 12;
   state.inspirationResolution = null;
@@ -951,7 +1188,8 @@ function jumpToItineraryOverview(workspace) {
 
 function syncActiveItineraryDay() {
   itineraryScrollFrame = null;
-  const days = [...document.querySelectorAll('[data-itinerary-day]')];
+  const workspace = ['edit', 'new'].includes(state.route.view) ? 'editor' : 'detail';
+  const days = [...document.querySelectorAll('[data-itinerary-day][id^="' + workspace + '-day-"]')];
   if (!days.length) return;
   const marker = 180;
   const atDocumentEnd = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 8;
@@ -1173,6 +1411,11 @@ async function applyReplan() {
 
 async function handleAction(target) {
   const action = target.dataset.action;
+  if (action === 'open-date-picker') return openDatePicker(target.dataset.dateRole);
+  if (action === 'close-date-picker') return closeDatePicker(true);
+  if (action === 'select-date') return selectDate(target.dataset.date);
+  if (action === 'date-prev-month') return moveCalendarMonth(-1);
+  if (action === 'date-next-month') return moveCalendarMonth(1);
   if (action === 'toggle-menu') return setMenu(true, target);
   if (action === 'close-menu') return setMenu(false);
   if (action === 'close-modal') return closeAuth();
@@ -1254,7 +1497,13 @@ async function handleAction(target) {
     return renderPlanner();
   }
   if (action === 'next-step') {
-    if (!state.draft.title || state.draft.endDate < state.draft.startDate) return toast('Hãy kiểm tra tên chuyến đi và ngày đi');
+    if (!String(state.draft.title || '').trim()) return toast('Hãy nhập tên chuyến đi.');
+    const dateError = dateValidationMessage();
+    if (dateError) return toast(dateError);
+    const travelers = Number(state.draft.travelers);
+    if (!Number.isInteger(travelers) || travelers < 1 || travelers > 12) return toast('Số người cần nằm trong khoảng 1–12.');
+    const budgetError = budgetValidationMessage();
+    if (budgetError) return toast(budgetError);
     if (state.step === 1 && !state.draft.selectedPlaceIds.length) return toast('Hãy chọn ít nhất một địa điểm để tạo lịch trình');
     state.step += 1;
     if (state.step === 3) return state.generated && state.generatedSignature === draftSignature() ? renderPlanner() : generate();
@@ -1306,6 +1555,7 @@ async function handleAction(target) {
 }
 
 document.addEventListener('click', async (event) => {
+  if (state.datePickerOpen && !event.target.closest('.date-range-field')) closeDatePicker();
   const link = event.target.closest('[data-route]');
   if (link) {
     event.preventDefault();
@@ -1335,8 +1585,15 @@ document.addEventListener('input', (event) => {
       if (input && Number.isInteger(caret)) input.setSelectionRange(caret, caret);
     });
   }
+  if (target.dataset.budgetInput !== undefined) {
+    handleBudgetInput(target);
+    return;
+  }
   const field = target.dataset.draft;
-  if (field) state.draft[field] = target.type === 'number' ? Number(target.value) : target.value;
+  if (field) {
+    state.draft[field] = target.type === 'number' ? Number(target.value) : target.value;
+    if (field === 'travelers') updateBudgetPerPersonText();
+  }
   const reviewField = target.dataset.reviewField;
   if (reviewField) {
     ensureReviewDraft();
@@ -1374,9 +1631,22 @@ document.addEventListener('change', (event) => {
     if (field === 'destinationId') filters.placeId = '';
     return navigateReviews({ ...filters, page: 1 });
   }
+  if (target.dataset.budgetInput !== undefined) {
+    const normalized = plannerInputs.normalizeBudgetInput(target.value);
+    if (!normalized.error) {
+      state.draft.targetBudget = normalized.value;
+      state.budgetInputValue = normalized.display;
+      state.budgetInputError = '';
+      target.value = normalized.display;
+    }
+    updateBudgetPerPersonText();
+    updateBudgetErrorState();
+    return;
+  }
   const field = target.dataset.draft;
   if (field) {
     state.draft[field] = target.type === 'number' ? Number(target.value) : target.value;
+    if (field === 'travelers') updateBudgetPerPersonText();
     if (field === 'destinationId') {
       state.draft.selectedPlaceIds = [];
       state.draft.stepTwoPlaceIds = [];
@@ -1448,6 +1718,7 @@ document.addEventListener('submit', async (event) => {
       const result = await api('/api/auth/' + data.mode, { method: 'POST', body: data });
       state.user = result.user;
       state.draft = defaultDraft();
+      syncBudgetInput(state.draft.targetBudget);
       $('#modal-root').innerHTML = '';
       await refreshPlans();
       const pending = state.pendingPath;
@@ -1507,9 +1778,23 @@ function closeAuth() {
 }
 
 document.addEventListener('keydown', (event) => {
+  if (event.target.matches('.calendar-day') && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+    event.preventDefault();
+    const offset = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[event.key];
+    const nextDate = plannerInputs.addDays(event.target.dataset.date, offset);
+    const nextButton = document.querySelector('.calendar-day[data-date="' + nextDate + '"]');
+    if (nextButton) nextButton.focus();
+    else {
+      state.datePickerMonth = plannerInputs.monthStart(nextDate);
+      renderPlanner();
+      requestAnimationFrame(() => document.querySelector('.calendar-day[data-date="' + nextDate + '"]')?.focus());
+    }
+    return;
+  }
   if (event.key === 'Escape') {
     if ($('#mobile-nav').classList.contains('is-open')) setMenu(false);
-    if (state.resetConfirmOpen) closeResetConfirmation();
+    if (state.datePickerOpen) closeDatePicker(true);
+    else if (state.resetConfirmOpen) closeResetConfirmation();
     else if (state.replanOpen) closeReplan();
     else if (state.reviewModalOpen) closeReviewModal();
     else if (state.reviewDetail) closePlaceReviews();
@@ -1558,6 +1843,7 @@ async function boot() {
     state.reviews = reviews.reviews;
     state.reviewPreview = { total: reviews.pagination?.total || 0, ratingSummary: reviews.ratingSummary || { average: null, count: 0 } };
     state.draft = defaultDraft();
+    syncBudgetInput(state.draft.targetBudget);
     if (state.user) await refreshPlans();
     await applyRoute({ scroll: false });
   } catch (error) {

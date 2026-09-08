@@ -44,8 +44,8 @@ function formatRange(start, duration) {
 }
 
 function daysBetween(startDate, endDate) {
-  const start = new Date(`${startDate}T00:00:00`);
-  const end = new Date(`${endDate}T00:00:00`);
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
   if (Number.isNaN(start.valueOf()) || Number.isNaN(end.valueOf()) || end < start) return 1;
   return Math.floor((end - start) / 86400000) + 1;
 }
