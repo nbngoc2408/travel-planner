@@ -31,6 +31,7 @@ const state = {
   placeSearch: '',
   placeVisibleCount: 12,
   pendingPath: null,
+  pendingTripDestinationId: null,
   replanOpen: false,
   replanDraft: null,
   replanPreview: null,
@@ -44,6 +45,13 @@ const state = {
   datePickerPhase: 'start',
   budgetInputValue: null,
   budgetInputError: '',
+  plannerErrors: {},
+  generating: false,
+  saving: false,
+  replanLoading: false,
+  itineraryBusy: false,
+  confirmDialog: null,
+  toastAction: null,
   toastTimer: null
 };
 
@@ -61,9 +69,12 @@ const categoryLabels = { nature: 'Thiên nhiên', beach: 'Biển', food: 'Ẩm t
 let lastMenuTrigger = null;
 let lastAuthTrigger = null;
 let lastModalTrigger = null;
+let placeReviewTrigger = null;
 let itineraryScrollFrame = null;
 let itineraryNormalizeTimer = null;
 let itineraryMutationVersion = 0;
+let itineraryRequestContext = 0;
+let itineraryRequestsInFlight = 0;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -76,12 +87,40 @@ async function api(path, options = {}) {
   return data;
 }
 
-function toast(message) {
+function toast(message, options = {}) {
   const element = $('#toast');
-  element.textContent = message;
+  element.replaceChildren();
+  const copy = document.createElement('span');
+  copy.textContent = message;
+  element.append(copy);
+  state.toastAction = typeof options.onAction === 'function' ? options.onAction : null;
+  element.classList.toggle('has-action', Boolean(state.toastAction));
+  if (state.toastAction) {
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.dataset.action = 'toast-action';
+    action.textContent = options.actionLabel || 'Hoàn tác';
+    element.append(action);
+  }
   element.classList.add('show');
   clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => element.classList.remove('show'), 2800);
+  state.toastTimer = setTimeout(() => {
+    element.classList.remove('show', 'has-action');
+    state.toastAction = null;
+  }, state.toastAction ? 5200 : 2800);
+}
+
+async function runToastAction() {
+  const action = state.toastAction;
+  state.toastAction = null;
+  clearTimeout(state.toastTimer);
+  $('#toast').classList.remove('show', 'has-action');
+  if (action) await action();
+}
+
+function setOverlayState(open) {
+  document.body.classList.toggle('modal-open', open);
+  document.querySelectorAll('.topbar, main, body > footer').forEach((element) => { element.inert = open; });
 }
 
 function clone(value) {
@@ -335,8 +374,35 @@ function handleBudgetInput(target) {
   updateBudgetErrorState();
 }
 
+function validateStepOne() {
+  const errors = {};
+  if (!String(state.draft.title || '').trim()) errors.title = 'Nhập tên chuyến đi để bạn dễ tìm lại sau này.';
+  const travelers = Number(state.draft.travelers);
+  if (!Number.isInteger(travelers) || travelers < 1 || travelers > 12) errors.travelers = 'Nhập số người từ 1 đến 12.';
+  const dateError = dateValidationMessage();
+  if (dateError) errors.dates = dateError;
+  const budgetError = budgetValidationMessage();
+  if (budgetError) errors.budget = budgetError;
+  state.plannerErrors = errors;
+  return errors;
+}
+
+function focusPlannerStep() {
+  requestAnimationFrame(() => {
+    const panel = document.querySelector('.step-panel, .planner-loading');
+    const heading = panel?.querySelector('h3, h2');
+    document.querySelector('#planner-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus({ preventScroll: true });
+    }
+  });
+}
+
 function renderStepOne() {
-  return '<div class="step-panel"><h3>Chuyến đi này có gì đặc biệt?</h3><p>Cho PinkTrip biết vài điều cơ bản để bắt đầu sắp xếp.</p><div class="form-grid"><div class="field"><label for="trip-title">Tên chuyến đi</label><input id="trip-title" data-draft="title" value="' + escapeHtml(state.draft.title) + '" placeholder="Ví dụ: Cuối tuần ở biển"></div><div class="field"><label for="trip-destination">Điểm đến</label><select id="trip-destination" data-draft="destinationId">' + state.destinations.map((item) => '<option value="' + item.id + '" ' + (item.id === state.draft.destinationId ? 'selected' : '') + '>' + escapeHtml(item.name) + ' · ' + escapeHtml(item.province) + '</option>').join('') + '</select></div>' + renderDateRangeControl() + '<div class="field"><label for="trip-travelers">Số người</label><input id="trip-travelers" type="number" min="1" max="12" inputmode="numeric" data-draft="travelers" value="' + escapeHtml(state.draft.travelers) + '"><small class="field-hint">Từ 1 đến 12 người</small></div>' + renderBudgetControl() + '<div class="field"><label for="trip-intensity">Nhịp điệu</label><select id="trip-intensity" data-draft="intensity"><option value="relaxed" ' + (state.draft.intensity === 'relaxed' ? 'selected' : '') + '>Thảnh thơi</option><option value="balanced" ' + (state.draft.intensity === 'balanced' ? 'selected' : '') + '>Cân bằng</option><option value="packed" ' + (state.draft.intensity === 'packed' ? 'selected' : '') + '>Nhiều trải nghiệm</option></select></div></div></div>';
+  const titleError = state.plannerErrors.title || '';
+  const travelersError = state.plannerErrors.travelers || '';
+  return '<div class="step-panel"><h3>Chuyến đi này có gì đặc biệt?</h3><p>Cho PinkTrip biết vài điều cơ bản để bắt đầu sắp xếp.</p><div class="form-grid"><div class="field' + (titleError ? ' has-error' : '') + '"><label for="trip-title">Tên chuyến đi</label><input id="trip-title" data-draft="title" value="' + escapeHtml(state.draft.title) + '" placeholder="Ví dụ: Cuối tuần ở biển" maxlength="80" aria-invalid="' + Boolean(titleError) + '"' + (titleError ? ' aria-describedby="trip-title-error"' : '') + '>' + (titleError ? '<p class="field-error" id="trip-title-error" role="alert">' + escapeHtml(titleError) + '</p>' : '') + '</div><div class="field"><label for="trip-destination">Điểm đến</label><select id="trip-destination" data-draft="destinationId">' + state.destinations.map((item) => '<option value="' + item.id + '" ' + (item.id === state.draft.destinationId ? 'selected' : '') + '>' + escapeHtml(item.name) + ' · ' + escapeHtml(item.province) + '</option>').join('') + '</select></div>' + renderDateRangeControl() + '<div class="field' + (travelersError ? ' has-error' : '') + '"><label for="trip-travelers">Số người</label><input id="trip-travelers" type="number" min="1" max="12" inputmode="numeric" data-draft="travelers" value="' + escapeHtml(state.draft.travelers) + '" aria-invalid="' + Boolean(travelersError) + '" aria-describedby="trip-travelers-help' + (travelersError ? ' trip-travelers-error' : '') + '"><small class="field-hint" id="trip-travelers-help">Từ 1 đến 12 người</small>' + (travelersError ? '<p class="field-error" id="trip-travelers-error" role="alert">' + escapeHtml(travelersError) + '</p>' : '') + '</div>' + renderBudgetControl() + '<div class="field"><label for="trip-intensity">Nhịp điệu</label><select id="trip-intensity" data-draft="intensity"><option value="relaxed" ' + (state.draft.intensity === 'relaxed' ? 'selected' : '') + '>Thảnh thơi</option><option value="balanced" ' + (state.draft.intensity === 'balanced' ? 'selected' : '') + '>Cân bằng</option><option value="packed" ' + (state.draft.intensity === 'packed' ? 'selected' : '') + '>Nhiều trải nghiệm</option></select></div></div></div>';
 }
 
 function draftSignature() {
@@ -423,7 +489,8 @@ function renderDestinations() {
 function renderDashboardOverview() {
   const plan = sortTrips(state.plans).find((item) => tripStatus(item).id !== 'past') || state.plans[0];
   const target = $('#dashboard-content');
-  let html = '<div class="app-page-heading"><div><div class="kicker">TỔNG QUAN</div><h1>Chào ' + escapeHtml(state.user.name.split(' ')[0]) + ', mình đi đâu tiếp?</h1><p>' + (state.plans.length ? 'Bạn đang có ' + state.plans.length + ' chuyến đi được lưu.' : 'Bắt đầu một ý tưởng nhỏ cho chuyến đi tiếp theo.') + '</p></div><div class="app-page-actions"><a class="button button-ghost" href="/trips" data-route>Xem tất cả chuyến đi</a><button class="button button-primary" data-action="new-trip">Tạo chuyến đi <span>↗</span></button></div></div>';
+  const headerActions = state.plans.length ? '<div class="app-page-actions"><a class="button button-ghost" href="/trips" data-route>Xem tất cả chuyến đi</a><button class="button button-primary" data-action="new-trip">Tạo chuyến đi <span>↗</span></button></div>' : '';
+  let html = '<div class="app-page-heading"><div><div class="kicker">TỔNG QUAN</div><h1>Chào ' + escapeHtml(state.user.name.split(' ')[0]) + ', mình đi đâu tiếp?</h1><p>' + (state.plans.length ? 'Bạn đang có ' + state.plans.length + ' chuyến đi được lưu.' : 'Bắt đầu một ý tưởng nhỏ cho chuyến đi tiếp theo.') + '</p></div>' + headerActions + '</div>';
   if (!plan) {
     target.innerHTML = html + '<div class="empty-plans"><h2>Chưa có chuyến đi nào</h2><p>Chọn một điểm đến, PinkTrip sẽ giúp bạn xếp lịch trình.</p><button class="button button-primary" data-action="new-trip">Tạo chuyến đi đầu tiên <span>↗</span></button></div>';
     return;
@@ -444,7 +511,7 @@ function renderTripsPage() {
   const query = state.tripSearch.trim().toLocaleLowerCase('vi-VN');
   const plans = sortTrips(state.plans).filter((plan) => (!query || (plan.title + ' ' + (plan.destination?.name || '')).toLocaleLowerCase('vi-VN').includes(query)) && (state.tripFilter === 'all' || tripStatus(plan).id === state.tripFilter));
   const filters = [['all', 'Tất cả'], ['upcoming', 'Sắp tới'], ['ongoing', 'Đang diễn ra'], ['past', 'Đã qua']].map(([id, label]) => '<button type="button" class="filter-tab ' + (state.tripFilter === id ? 'active' : '') + '" data-action="filter-trips" data-filter="' + id + '" aria-pressed="' + (state.tripFilter === id) + '">' + label + '</button>').join('');
-  let html = '<div class="app-page-heading"><div><div class="kicker">MY TRIPS</div><h1>Chuyến đi của tôi</h1><p>Lưu lại những hành trình đang chờ và những nơi bạn đã đi qua.</p></div><button class="button button-primary" data-action="new-trip">Tạo chuyến đi <span>↗</span></button></div><div class="trip-toolbar"><label class="search-field" for="trip-search"><span class="sr-only">Tìm chuyến đi</span><span aria-hidden="true">⌕</span><input id="trip-search" type="search" data-trip-search value="' + escapeHtml(state.tripSearch) + '" placeholder="Tìm theo tên hoặc điểm đến"></label><div class="filter-tabs" role="group" aria-label="Lọc chuyến đi">' + filters + '</div></div>';
+  let html = '<div class="app-page-heading"><div><div class="kicker">THƯ VIỆN HÀNH TRÌNH</div><h1>Chuyến đi của tôi</h1><p>Lưu lại những hành trình đang chờ và những nơi bạn đã đi qua.</p></div><button class="button button-primary" data-action="new-trip">Tạo chuyến đi <span>↗</span></button></div><div class="trip-toolbar"><label class="search-field" for="trip-search"><span class="sr-only">Tìm chuyến đi</span><span aria-hidden="true">⌕</span><input id="trip-search" type="search" data-trip-search value="' + escapeHtml(state.tripSearch) + '" placeholder="Tìm theo tên hoặc điểm đến"></label><div class="filter-tabs" role="group" aria-label="Lọc chuyến đi">' + filters + '</div></div>';
   html += plans.length ? '<div class="trips-grid' + (plans.length === 1 ? ' single-trip' : '') + '">' + plans.map(renderTripCard).join('') + '</div>' : '<div class="empty-plans"><h2>' + (state.plans.length ? 'Không tìm thấy chuyến đi phù hợp' : 'Chưa có chuyến đi nào') + '</h2><p>' + (state.plans.length ? 'Thử một từ khóa hoặc bộ lọc khác nhé.' : 'Bản kế hoạch đầu tiên của bạn đang chờ được tạo.') + '</p>' + (state.plans.length ? '<button class="button button-ghost" data-action="clear-trip-filters">Xóa bộ lọc</button>' : '<button class="button button-primary" data-action="new-trip">Tạo chuyến đi đầu tiên <span>↗</span></button>') + '</div>';
   target.innerHTML = html;
 }
@@ -537,8 +604,16 @@ function renderDayNavigator(days, workspace) {
   }).join('') + '</div></nav>';
 }
 
+function hasItineraryChanges() {
+  if (!state.generated?.itinerary || !state.itineraryBaseline) return false;
+  return JSON.stringify({ itinerary: state.generated.itinerary, budget: state.generated.budget }) !== JSON.stringify(state.itineraryBaseline);
+}
+
 function renderItineraryActions() {
-  return '<div class="itinerary-sticky-actions"><div><strong>Lịch trình của bạn</strong><span>Đặt lại chỉ hoàn tác các chỉnh sửa chưa lưu về lịch trình đã lưu gần nhất.</span></div><div class="itinerary-primary-actions"><button class="button button-ghost button-small" type="button" data-action="open-replan">Điều chỉnh</button><button class="button button-ghost button-small itinerary-reset" type="button" data-action="reset-itinerary">Đặt lại lịch trình</button><button class="button button-primary button-small" type="button" data-action="save-plan">Lưu chuyến đi <span>✓</span></button></div></div>';
+  const dirty = hasItineraryChanges();
+  const status = state.editingPlanId ? (dirty ? 'Có thay đổi chưa lưu' : 'Đã đồng bộ với bản đã lưu') : 'Bản nháp chưa được lưu';
+  const busy = state.itineraryBusy;
+  return '<div class="itinerary-sticky-actions" aria-busy="' + busy + '"><div><strong><span class="save-state-dot ' + (dirty || !state.editingPlanId ? 'is-dirty' : 'is-saved') + '" aria-hidden="true"></span>' + status + '</strong><span>' + (dirty ? 'Bạn có thể đặt lại về phiên bản đã lưu gần nhất.' : 'Mọi thay đổi lịch trình sẽ được phản ánh vào ngân sách.') + '</span></div><div class="itinerary-primary-actions"><button class="button button-ghost button-small" type="button" data-action="open-replan"' + (busy || state.saving ? ' disabled' : '') + '>Điều chỉnh</button><button class="button button-ghost button-small itinerary-reset" type="button" data-action="reset-itinerary"' + (!dirty || busy || state.saving ? ' disabled' : '') + '>Đặt lại lịch trình</button><button class="button button-primary button-small' + (state.saving ? ' is-loading' : '') + '" type="button" data-action="save-plan"' + (busy || state.saving ? ' disabled' : '') + '>' + (state.saving ? 'Đang lưu…' : 'Lưu chuyến đi <span>✓</span>') + '</button></div></div>';
 }
 
 function renderItineraryOverview({ destination, startDate, endDate, travelers, intensity, budget, days, workspace, editable = false }) {
@@ -560,7 +635,7 @@ function renderTripDetail() {
     return;
   }
   if (!state.activeTrip) {
-    target.innerHTML = '<div class="page-state"><h1>Không tìm thấy chuyến đi này</h1><p>Chuyến đi có thể đã bị xóa hoặc không thuộc tài khoản của bạn.</p><a class="button button-primary" href="/trips" data-route>Về My Trips</a></div>';
+    target.innerHTML = '<div class="page-state"><h1>Không tìm thấy chuyến đi này</h1><p>Chuyến đi có thể đã bị xóa hoặc không thuộc tài khoản của bạn.</p><a class="button button-primary" href="/trips" data-route>Về chuyến đi của tôi</a></div>';
     return;
   }
   const plan = state.activeTrip;
@@ -572,7 +647,8 @@ function renderTripDetail() {
 }
 
 function serviceCard(item) {
-  return '<article class="service-card"><img src="' + item.image + '" alt="' + escapeHtml(item.name) + '"><div><h3>' + escapeHtml(item.name) + '</h3><p>' + escapeHtml(item.description) + '</p><small>' + escapeHtml(item.type) + ' · ' + item.priceRange + ' · ★ ' + item.rating + '</small></div></article>';
+  const type = ({ restaurant: 'Nhà hàng', homestay: 'Homestay', cafe: 'Quán cà phê', hotel: 'Khách sạn' }[item.type] || item.type);
+  return '<article class="service-card"><img src="' + item.image + '" alt="' + escapeHtml(item.name) + '"><div><h3>' + escapeHtml(item.name) + '</h3><p>' + escapeHtml(item.description) + '</p><small>' + escapeHtml(type) + ' · ' + item.priceRange + ' · ★ ' + item.rating + '</small></div></article>';
 }
 
 function renderServices() {
@@ -682,6 +758,7 @@ function renderReviews() {
 function renderReviewModal() {
   if (!state.reviewModalOpen) return;
   $('#modal-root').innerHTML = '<div class="modal-backdrop"><section class="modal review-modal" role="dialog" aria-modal="true" aria-labelledby="review-modal-title"><button class="modal-close" type="button" data-action="close-review-modal" aria-label="Đóng cửa sổ">×</button><div class="kicker">TRẢI NGHIỆM THẬT</div><h2 id="review-modal-title">' + (state.reviewEditingId ? 'Cập nhật đánh giá' : 'Chia sẻ trải nghiệm') + '</h2><p>Đánh giá có thể dành cho cả điểm đến hoặc một nơi bạn đã ghé.</p>' + renderReviewForm({ modal: true }) + '</section></div>';
+  setOverlayState(true);
   requestAnimationFrame(() => $('#modal-review-destination')?.focus());
 }
 
@@ -694,6 +771,7 @@ function renderPlaceReviewModal() {
   const total = detail.pagination?.total || summary.count || 0;
   const reviewsHtml = detail.reviews.length ? detail.reviews.map((review) => renderReviewCard(review, { compact: true, preview: true })).join('') : '<div class="review-empty"><strong>Chưa có chia sẻ nào cho địa điểm này.</strong><span>Hãy là người đầu tiên chia sẻ kinh nghiệm thực tế.</span></div>';
   $('#modal-root').innerHTML = '<div class="modal-backdrop"><section class="modal place-review-modal" role="dialog" aria-modal="true" aria-labelledby="place-review-title"><button class="modal-close" type="button" data-action="close-place-reviews" aria-label="Đóng cửa sổ">×</button><div class="kicker">GÓC NHÌN CỘNG ĐỒNG</div><h2 id="place-review-title">' + escapeHtml(detail.place.name) + '</h2><p>' + escapeHtml(detail.place.description) + '</p><div class="place-rating-summary"><strong>' + (summary.count ? Number(summary.average).toFixed(1) : '—') + '</strong><div><span aria-label="Điểm đánh giá">★</span><small>' + (summary.count ? summary.count + ' đánh giá' : 'Chưa có đánh giá') + '</small></div></div>' + (summary.count ? '<div class="rating-distribution" aria-label="Phân bố đánh giá">' + distribution + '</div>' : '') + '<div class="place-review-modal-actions"><button class="button button-primary" type="button" data-action="open-review" data-destination-id="' + detail.place.destinationId + '" data-place-id="' + detail.place.id + '">Viết đánh giá <span>↗</span></button>' + (total ? '<button class="button button-ghost" type="button" data-action="view-all-reviews" data-destination-id="' + detail.place.destinationId + '" data-place-id="' + detail.place.id + '">Xem tất cả ' + total + ' đánh giá <span>→</span></button>' : '') + '</div><div class="place-review-list">' + reviewsHtml + '</div></section></div>';
+  setOverlayState(true);
   requestAnimationFrame(() => $('.place-review-modal .modal-close')?.focus());
 }
 
@@ -729,6 +807,7 @@ function renderReviewPage() {
   const browse = state.reviewBrowse;
   const filters = state.route.reviewFilters || browse.filters || { destinationId: '', placeId: '', rating: '', sort: 'newest', page: 1 };
   const scope = reviewScope(filters);
+  const hasActiveFilters = Boolean(filters.destinationId || filters.placeId || filters.rating || (filters.sort && filters.sort !== 'newest'));
   const availablePlaces = state.places.filter((item) => !filters.destinationId || item.destinationId === filters.destinationId);
   if (browse.loading) {
     target.innerHTML = '<div class="page-state"><h1>Đang mở những trải nghiệm…</h1><p>PinkTrip đang gom những chia sẻ phù hợp.</p></div>';
@@ -745,8 +824,8 @@ function renderReviewPage() {
     .map(([value, label]) => '<option value="' + value + '" ' + (filters.sort === value ? 'selected' : '') + '>' + label + '</option>').join('');
   const results = browse.items.length
     ? '<div class="review-list">' + browse.items.map((review) => renderReviewCard(review)).join('') + '</div>'
-    : '<div class="review-empty reviews-page-empty"><strong>Chưa có đánh giá phù hợp.</strong><span>' + (scope.placeId ? 'Hãy là người đầu tiên chia sẻ về địa điểm này.' : 'Thử đổi bộ lọc hoặc chia sẻ một trải nghiệm của bạn.') + '</span><button class="button button-primary button-small" type="button" data-action="open-review"' + (scope.destinationId ? ' data-destination-id="' + scope.destinationId + '"' : '') + (scope.placeId ? ' data-place-id="' + scope.placeId + '"' : '') + '>Viết đánh giá <span>↗</span></button></div>';
-  target.innerHTML = '<button class="back-link review-back" type="button" data-action="reviews-back">← Quay lại</button><div class="app-page-heading review-page-heading"><div><div class="kicker">GÓC NHÌN CỘNG ĐỒNG</div><h1>' + escapeHtml(scope.title) + '</h1><p>' + escapeHtml(scope.description) + '</p></div><button class="button button-primary" type="button" data-action="open-review"' + (scope.destinationId ? ' data-destination-id="' + scope.destinationId + '"' : '') + (scope.placeId ? ' data-place-id="' + scope.placeId + '"' : '') + '>Viết đánh giá <span>↗</span></button></div>' + renderRatingSummary(browse.ratingSummary, browse.ratingDistribution) + '<section class="review-filters" aria-label="Lọc đánh giá"><div class="field"><label for="review-filter-destination">Điểm đến</label><select id="review-filter-destination" data-review-filter="destinationId"><option value="">Tất cả điểm đến</option>' + state.destinations.map((item) => '<option value="' + item.id + '" ' + (filters.destinationId === item.id ? 'selected' : '') + '>' + escapeHtml(item.name) + '</option>').join('') + '</select></div><div class="field"><label for="review-filter-place">Địa điểm</label><select id="review-filter-place" data-review-filter="placeId">' + placeOptions + '</select></div><div class="field"><label for="review-filter-rating">Số sao</label><select id="review-filter-rating" data-review-filter="rating">' + ratingOptions + '</select></div><div class="field"><label for="review-filter-sort">Sắp xếp</label><select id="review-filter-sort" data-review-filter="sort">' + sortOptions + '</select></div></section><div class="review-results-heading"><strong>' + (browse.pagination?.total || 0) + ' đánh giá</strong><span>' + (browse.pagination?.totalPages > 1 ? 'Trang ' + browse.pagination.page + ' / ' + browse.pagination.totalPages : 'Hiển thị mới nhất') + '</span></div>' + results + renderReviewPagination(browse.pagination);
+    : '<div class="review-empty reviews-page-empty"><strong>Chưa có đánh giá phù hợp.</strong><span>' + (scope.placeId ? 'Hãy là người đầu tiên chia sẻ về địa điểm này.' : 'Thử đổi bộ lọc hoặc chia sẻ một trải nghiệm của bạn.') + '</span><div class="empty-state-actions">' + (hasActiveFilters ? '<button class="button button-ghost button-small" type="button" data-action="clear-review-filters">Xóa bộ lọc</button>' : '') + '<button class="button button-primary button-small" type="button" data-action="open-review"' + (scope.destinationId ? ' data-destination-id="' + scope.destinationId + '"' : '') + (scope.placeId ? ' data-place-id="' + scope.placeId + '"' : '') + '>Viết đánh giá <span>↗</span></button></div></div>';
+  target.innerHTML = '<button class="back-link review-back" type="button" data-action="reviews-back">← Quay lại</button><div class="app-page-heading review-page-heading"><div><div class="kicker">GÓC NHÌN CỘNG ĐỒNG</div><h1>' + escapeHtml(scope.title) + '</h1><p>' + escapeHtml(scope.description) + '</p></div><button class="button button-primary" type="button" data-action="open-review"' + (scope.destinationId ? ' data-destination-id="' + scope.destinationId + '"' : '') + (scope.placeId ? ' data-place-id="' + scope.placeId + '"' : '') + '>Viết đánh giá <span>↗</span></button></div>' + renderRatingSummary(browse.ratingSummary, browse.ratingDistribution) + '<section class="review-filters" aria-label="Lọc đánh giá"><div class="field"><label for="review-filter-destination">Điểm đến</label><select id="review-filter-destination" data-review-filter="destinationId"><option value="">Tất cả điểm đến</option>' + state.destinations.map((item) => '<option value="' + item.id + '" ' + (filters.destinationId === item.id ? 'selected' : '') + '>' + escapeHtml(item.name) + '</option>').join('') + '</select></div><div class="field"><label for="review-filter-place">Địa điểm</label><select id="review-filter-place" data-review-filter="placeId">' + placeOptions + '</select></div><div class="field"><label for="review-filter-rating">Số sao</label><select id="review-filter-rating" data-review-filter="rating">' + ratingOptions + '</select></div><div class="field"><label for="review-filter-sort">Sắp xếp</label><select id="review-filter-sort" data-review-filter="sort">' + sortOptions + '</select></div>' + (hasActiveFilters ? '<button class="text-button review-filter-clear" type="button" data-action="clear-review-filters">Xóa bộ lọc</button>' : '') + '</section><div class="review-results-heading"><strong>' + (browse.pagination?.total || 0) + ' đánh giá</strong><span>' + (browse.pagination?.totalPages > 1 ? 'Trang ' + browse.pagination.page + ' / ' + browse.pagination.totalPages : 'Hiển thị mới nhất') + '</span></div>' + results + renderReviewPagination(browse.pagination);
 }
 
 async function loadReviewBrowse(filters) {
@@ -779,7 +858,9 @@ async function loadReviewBrowse(filters) {
 function navigateReviews(filters) {
   state.reviewDetail = null;
   state.reviewModalOpen = false;
+  placeReviewTrigger = null;
   $('#modal-root').innerHTML = '';
+  setOverlayState(false);
   return navigate(reviewPath(filters));
 }
 
@@ -802,6 +883,7 @@ function closeReviewModal(restoreFocus = true, returnToPlaceDetail = true) {
   state.reviewModalOpen = false;
   state.reviewEditingId = null;
   $('#modal-root').innerHTML = '';
+  setOverlayState(false);
   const returnDetail = returnToPlaceDetail ? state.reviewReturnDetail : null;
   state.reviewReturnDetail = null;
   if (returnDetail) {
@@ -812,21 +894,26 @@ function closeReviewModal(restoreFocus = true, returnToPlaceDetail = true) {
   if (restoreFocus && lastModalTrigger instanceof HTMLElement) lastModalTrigger.focus();
 }
 
-async function openPlaceReviews(placeId) {
+async function openPlaceReviews(placeId, { preserveTrigger = false } = {}) {
   const selectedPlace = place(placeId);
   if (!selectedPlace) return;
-  lastModalTrigger = document.activeElement;
+  if (!preserveTrigger) placeReviewTrigger = document.activeElement;
   try {
     const result = await api('/api/reviews?placeId=' + encodeURIComponent(placeId) + '&page=1&pageSize=3&sort=newest');
     state.reviewDetail = { place: selectedPlace, ...result };
     renderPlaceReviewModal();
-  } catch (error) { toast(error.message); }
+  } catch (error) {
+    if (state.reviewDetail) renderPlaceReviewModal();
+    toast(error.message);
+  }
 }
 
 function closePlaceReviews(restoreFocus = true) {
   state.reviewDetail = null;
   $('#modal-root').innerHTML = '';
-  if (restoreFocus && lastModalTrigger instanceof HTMLElement) lastModalTrigger.focus();
+  setOverlayState(false);
+  if (restoreFocus && placeReviewTrigger instanceof HTMLElement) placeReviewTrigger.focus();
+  placeReviewTrigger = null;
 }
 
 function editReview(id) {
@@ -836,18 +923,31 @@ function editReview(id) {
 }
 
 async function deleteReview(id) {
-  if (!window.confirm('Xóa đánh giá này?')) return;
+  const review = findReview(id);
+  openConfirmDialog({
+    kind: 'review',
+    id,
+    title: 'Xóa đánh giá này?',
+    description: 'Chia sẻ của bạn về ' + reviewLocation(review || {}) + ' sẽ bị xóa và không thể khôi phục.',
+    confirmLabel: 'Xóa đánh giá'
+  });
+}
+
+async function performDeleteReview(id) {
   try {
     await api('/api/reviews/' + encodeURIComponent(id), { method: 'DELETE' });
     await refreshReviewData();
-    if (state.reviewDetail) await openPlaceReviews(state.reviewDetail.place.id);
+    if (state.reviewDetail) await openPlaceReviews(state.reviewDetail.place.id, { preserveTrigger: true });
     else if (state.route.view === 'reviews') {
       const filters = state.route.reviewFilters || state.reviewBrowse.filters;
       await loadReviewBrowse(filters);
       render();
     } else render();
     toast('Đã xóa đánh giá');
-  } catch (error) { toast(error.message); }
+  } catch (error) {
+    if (state.reviewDetail) renderPlaceReviewModal();
+    toast(error.message);
+  }
 }
 
 function filteredPlaces() {
@@ -874,7 +974,7 @@ function renderStepTwo() {
   const visibleCandidates = candidates.slice(0, state.placeVisibleCount);
   const resultHtml = candidates.length
     ? visibleCandidates.map((item) => pickerCard(item)).join('') + (visibleCandidates.length < candidates.length ? '<div class="place-picker-actions"><button class="button button-ghost" type="button" data-action="load-more-places">Xem thêm ' + Math.min(12, candidates.length - visibleCandidates.length) + ' địa điểm <span>↓</span></button></div>' : '')
-    : '<div class="empty-filter-state"><strong>Không tìm thấy địa điểm phù hợp với các sở thích đã chọn.</strong><span>Hãy thử thay đổi hoặc xóa bớt bộ lọc.</span><button class="button button-ghost button-small" data-action="clear-interests">Xóa bộ lọc</button></div>';
+    : '<div class="empty-filter-state"><strong>Không tìm thấy địa điểm phù hợp.</strong><span>Thử từ khóa khác hoặc xóa các bộ lọc đang dùng.</span><button class="button button-ghost button-small" type="button" data-action="clear-place-filters">Xóa tìm kiếm &amp; bộ lọc</button></div>';
   const selectedNames = selected.slice(0, 6).map((item) => item.name);
   if (selected.length > selectedNames.length) selectedNames.push('và ' + (selected.length - selectedNames.length) + ' địa điểm khác');
   const selectedSummary = selected.length ? '<div class="selected-summary" aria-live="polite"><strong>' + selected.length + ' địa điểm đã chọn</strong><span>' + escapeHtml(selectedNames.join(' · ')) + '</span></div>' : '<div class="selected-summary is-empty" aria-live="polite"><strong>Chưa chọn địa điểm</strong><span>Chọn ít nhất một nơi để PinkTrip tạo lịch trình.</span></div>';
@@ -949,6 +1049,7 @@ function editorDay(day, dayIndex) {
 
 function renderPlanner() {
   const target = $('#planner-card');
+  target.classList.toggle('has-persistent-actions', state.plannerOpen && state.step < 3);
   if (state.route.view === 'edit' && state.routeStatus === 'loading') {
     target.innerHTML = '<div class="planner-invite"><div><div class="kicker">ĐANG MỞ BẢN NHÁP</div><h3>PinkTrip đang chuẩn bị lịch trình của bạn.</h3></div></div>';
     return;
@@ -957,7 +1058,7 @@ function renderPlanner() {
     target.innerHTML = '<div class="planner-invite"><div><div class="kicker">SẴN SÀNG CHƯA?</div><h3>Hãy để chuyến đi bắt đầu từ một ý thích.</h3><p>Chọn điểm đến, ngày đi và nhịp độ. PinkTrip sẽ tạo cho bạn một bản nháp để tiếp tục chỉnh sửa.</p></div><button class="button button-primary" data-action="new-trip">Bắt đầu <span>↗</span></button></div>';
     return;
   }
-  const nav = '<div class="planner-steps">' + ['Thông tin', 'Điểm đến', 'Cảm hứng', 'Lịch trình'].map((item, index) => '<span class="planner-step ' + (index === state.step ? 'active ' : '') + (index < state.step ? 'done' : '') + '">' + String(index + 1).padStart(2, '0') + ' ' + item + '</span>').join('') + '</div>';
+  const nav = '<ol class="planner-steps" aria-label="Tiến trình tạo chuyến đi">' + ['Thông tin', 'Điểm đến', 'Cảm hứng', 'Lịch trình'].map((item, index) => '<li class="planner-step ' + (index === state.step ? 'active ' : '') + (index < state.step ? 'done' : '') + '"' + (index === state.step ? ' aria-current="step"' : '') + '><span class="planner-step-marker" aria-hidden="true">' + (index < state.step ? '✓' : String(index + 1).padStart(2, '0')) + '</span><span class="planner-step-label">' + item + '</span></li>').join('') + '</ol>';
   let content = '';
   if (state.step === 0) {
     content = renderStepOne();
@@ -965,15 +1066,18 @@ function renderPlanner() {
     content = renderStepTwo();
   } else if (state.step === 2) {
     content = renderInspirationStep();
+  } else if (state.step === 3 && state.generating) {
+    content = '<div class="planner-loading" role="status" aria-live="polite"><span class="loading-spinner" aria-hidden="true"></span><div><h3>Đang tạo lịch trình vừa vặn…</h3><p>PinkTrip đang cân bằng điểm đến, thời gian và ngân sách của bạn.</p></div></div>';
   } else if (state.step === 3 && state.generated) {
     const other = state.places.filter((item) => item.destinationId === state.generated.destination.id && !(state.draft.selectedPlaceIds || []).includes(item.id)).slice(0, 3);
     content = '<div class="step-panel itinerary-editor-panel">' + renderItineraryOverview({ destination: state.generated.destination, startDate: state.draft.startDate, endDate: state.draft.endDate, travelers: state.draft.travelers, intensity: state.draft.intensity, budget: state.generated.budget, days: state.generated.itinerary, workspace: 'editor', editable: true }) + renderDayNavigator(state.generated.itinerary, 'editor') + renderItineraryActions() + '<div class="editor-toolbar"><div><strong>' + (state.itineraryView === 'compact' ? 'Tóm tắt lịch trình' : 'Chỉnh sửa lịch trình') + '</strong><span>' + (state.itineraryView === 'compact' ? 'Xem nhịp di chuyển trong ngày. Chuyển sang Chi tiết khi cần chỉnh sửa.' : 'Chọn ngày đích để di chuyển, hoặc dùng ↑ ↓ để đổi thứ tự.') + '</span></div></div><div class="result-grid"><div><div class="timeline-list">' + state.generated.itinerary.map(editorDay).join('') + '</div><section class="add-stop-section"><h4>Muốn thêm một điểm dừng?</h4><p>Thêm vào lựa chọn rồi PinkTrip sẽ xếp lại bản nháp.</p><div class="place-picker">' + other.map((item) => pickerCard(item, 'add-stop')).join('') + '</div></section></div>' + renderBudget(state.generated.budget, state.draft.targetBudget, state.generated.itinerary.length) + '</div></div>';
   }
-  const nextLabel = state.step === 2 ? 'Tiếp tục không thêm link' : state.step === 1 ? 'Tiếp tục' : 'Tiếp tục';
+  const selectedCount = (state.draft.selectedPlaceIds || []).length;
+  const nextLabel = state.step === 2 ? (state.inspirationInput || state.inspirationResolution ? 'Tạo lịch trình' : 'Tiếp tục không thêm link') : state.step === 1 ? 'Tiếp tục · ' + selectedCount + ' địa điểm' : 'Tiếp tục';
   const footerActions = state.step === 3
     ? ''
-    : '<button class="button button-primary button-small" type="button" data-action="next-step">' + nextLabel + ' <span>→</span></button>';
-  target.innerHTML = nav + content + '<div class="planner-actions"><button class="button button-ghost button-small" type="button" data-action="prev-step" ' + (state.step === 0 ? 'disabled' : '') + '>← Quay lại</button><div>' + footerActions + '</div></div>';
+    : '<button class="button button-primary button-small" type="button" data-action="next-step"' + (state.step === 1 && !selectedCount ? ' disabled' : '') + '>' + nextLabel + ' <span>→</span></button>';
+  target.innerHTML = nav + content + '<div class="planner-actions' + (state.step < 3 ? ' planner-actions-persistent' : '') + '"><button class="button button-ghost button-small" type="button" data-action="prev-step" ' + (state.step === 0 ? 'disabled' : '') + '>← Quay lại</button><div>' + footerActions + '</div></div>';
 }
 
 function renderRouteVisibility() {
@@ -986,8 +1090,22 @@ function renderRouteVisibility() {
   $('#reviews-view').classList.toggle('hidden', state.route.view !== 'reviews');
 }
 
+function updateDocumentTitle() {
+  const titles = {
+    home: 'PinkTrip — Lên kế hoạch theo cách của bạn',
+    dashboard: 'Tổng quan — PinkTrip',
+    trips: 'Chuyến đi của tôi — PinkTrip',
+    new: 'Tạo chuyến đi — PinkTrip',
+    edit: 'Chỉnh sửa lịch trình — PinkTrip',
+    detail: (state.activeTrip?.title || 'Chi tiết chuyến đi') + ' — PinkTrip',
+    reviews: 'Đánh giá & trải nghiệm — PinkTrip'
+  };
+  document.title = titles[state.route.view] || titles.home;
+}
+
 function render() {
   renderRouteVisibility();
+  updateDocumentTitle();
   renderNavigation();
   renderAccount();
   renderDestinations();
@@ -1002,6 +1120,7 @@ function render() {
   if (state.resetConfirmOpen) renderResetConfirmation();
   if (state.reviewModalOpen) renderReviewModal();
   if (state.reviewDetail) renderPlaceReviewModal();
+  if (state.confirmDialog) renderConfirmDialog();
 }
 
 function setMenu(open, trigger) {
@@ -1013,12 +1132,14 @@ function setMenu(open, trigger) {
     menu.setAttribute('aria-hidden', 'false');
     toggle.setAttribute('aria-expanded', 'true');
     document.body.classList.add('menu-open');
+    setOverlayState(true);
     requestAnimationFrame(() => menu.querySelector('.mobile-nav-links a, .mobile-nav-links button, .menu-close')?.focus());
   } else {
     menu.classList.remove('is-open');
     menu.setAttribute('aria-hidden', 'true');
     toggle.setAttribute('aria-expanded', 'false');
     document.body.classList.remove('menu-open');
+    setOverlayState(false);
     if (lastMenuTrigger instanceof HTMLElement) lastMenuTrigger.focus();
   }
 }
@@ -1028,10 +1149,12 @@ function openAuth(mode) {
   lastAuthTrigger = document.activeElement;
   lastModalTrigger = lastAuthTrigger;
   $('#modal-root').innerHTML = '<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title"><button class="modal-close" type="button" data-action="close-modal" aria-label="Đóng cửa sổ">×</button><div class="kicker">PINKTRIP</div><h2 id="auth-title">' + (login ? 'Chào mừng trở lại.' : 'Bắt đầu hành trình.') + '</h2><p>' + (login ? 'Đăng nhập để xem những chuyến đi đã lưu.' : 'Tạo tài khoản để lưu lịch trình của riêng bạn.') + '</p><form data-form="auth"><input type="hidden" name="mode" value="' + mode + '">' + (login ? '' : '<div class="field"><label for="auth-name">Tên của bạn</label><input id="auth-name" name="name" required autocomplete="name" placeholder="Ví dụ: Minh Anh"></div>') + '<div class="field"><label for="auth-email">Email</label><input id="auth-email" name="email" type="email" required autocomplete="email" placeholder="you@example.com"></div><div class="field"><label for="auth-password">Mật khẩu</label><input id="auth-password" name="password" minlength="8" type="password" required autocomplete="' + (login ? 'current-password' : 'new-password') + '" placeholder="Tối thiểu 8 ký tự"></div><div class="error-message" data-auth-error aria-live="polite"></div><button class="button button-primary" type="submit" style="width:100%">' + (login ? 'Đăng nhập' : 'Tạo tài khoản') + ' <span>↗</span></button></form><div class="modal-switch">' + (login ? 'Chưa có tài khoản?' : 'Đã có tài khoản?') + ' <button type="button" data-action="' + (login ? 'register' : 'login') + '">' + (login ? 'Đăng ký' : 'Đăng nhập') + '</button></div></section></div>';
+  setOverlayState(true);
   requestAnimationFrame(() => $('#modal-root input:not([type="hidden"])')?.focus());
 }
 
 function loadPlanIntoEditor(plan) {
+  resetItineraryNormalization();
   state.editingPlanId = plan.id;
   state.plannerOpen = true;
   state.step = 3;
@@ -1062,6 +1185,8 @@ async function applyRoute({ scroll = true } = {}) {
   }
   const previous = state.route;
   state.route = route;
+  if (['new', 'edit'].includes(previous.view)
+    && (route.view !== previous.view || route.planId !== previous.planId)) resetItineraryNormalization();
   state.activeTrip = null;
   if (route.view === 'detail' || route.view === 'edit') {
     state.routeStatus = 'loading';
@@ -1105,26 +1230,38 @@ async function applyRoute({ scroll = true } = {}) {
 }
 
 function navigate(path, options = {}) {
-  if (window.location.pathname !== path) history[options.replace ? 'replaceState' : 'pushState']({}, '', path);
+  if (window.location.pathname + window.location.search !== path) history[options.replace ? 'replaceState' : 'pushState']({}, '', path);
   return applyRoute(options);
 }
 
 async function generate() {
+  if (state.generating) return;
+  state.generating = true;
+  renderPlanner();
   try {
     state.generated = await api('/api/plans/generate', { method: 'POST', body: state.draft });
     establishItineraryBaseline();
     state.generatedSignature = draftSignature();
+    state.generating = false;
     render();
+    focusPlannerStep();
   } catch (error) {
+    state.generating = false;
+    state.step = 2;
+    renderPlanner();
+    focusPlannerStep();
     toast(error.message);
   }
 }
 
 function startNewTrip(id) {
   if (!state.user) {
+    state.pendingPath = '/trips/new';
+    state.pendingTripDestinationId = id || null;
     openAuth('register');
     return;
   }
+  resetItineraryNormalization();
   state.plannerOpen = true;
   state.step = 0;
   state.editingPlanId = null;
@@ -1141,6 +1278,9 @@ function startNewTrip(id) {
   state.inspirationInput = '';
   state.itineraryView = 'detailed';
   state.activeItineraryDay = 0;
+  state.plannerErrors = {};
+  state.generating = false;
+  state.saving = false;
   navigate('/trips/new', { scroll: false });
   requestAnimationFrame(() => $('#planner').scrollIntoView({ behavior: 'smooth' }));
 }
@@ -1160,8 +1300,12 @@ async function persistCurrentPlan() {
 
 async function savePlan() {
   if (!state.generated?.itinerary) return toast('Hãy tạo lịch trình trước khi lưu');
+  if (state.saving || state.itineraryBusy) return;
+  state.saving = true;
+  renderPlanner();
   try {
     const plan = await persistCurrentPlan();
+    state.saving = false;
     state.plannerOpen = false;
     state.editingPlanId = null;
     state.replanOpen = false;
@@ -1169,20 +1313,50 @@ async function savePlan() {
     toast('Đã lưu chuyến đi của bạn ✦');
     await navigate('/trips/' + encodeURIComponent(plan.id));
   } catch (error) {
+    state.saving = false;
+    renderPlanner();
     toast(error.message);
   }
+}
+
+function updateItineraryNavigation(workspace, dayIndex) {
+  document.querySelectorAll('[data-action="jump-itinerary-overview"][data-workspace="' + workspace + '"]').forEach((button) => {
+    button.classList.remove('active');
+    button.setAttribute('aria-current', 'false');
+  });
+  document.querySelectorAll('[data-action="jump-itinerary-day"][data-workspace="' + workspace + '"]').forEach((button) => {
+    const active = Number(button.dataset.dayIndex) === dayIndex;
+    button.classList.toggle('active', active);
+    if (button.classList.contains('itinerary-nav-chip')) button.setAttribute('aria-current', active ? 'step' : 'false');
+  });
+  const activeChip = document.querySelector('.itinerary-nav-chip[data-workspace="' + workspace + '"][data-day-index="' + dayIndex + '"]');
+  const strip = activeChip?.closest('.itinerary-nav-scroll');
+  if (strip && activeChip) {
+    strip.scrollTo({ left: Math.max(0, activeChip.offsetLeft - (strip.clientWidth - activeChip.clientWidth) / 2), behavior: 'smooth' });
+  }
+}
+
+function updateItineraryOverviewNavigation(workspace) {
+  document.querySelectorAll('[data-action="jump-itinerary-day"][data-workspace="' + workspace + '"]').forEach((button) => {
+    button.classList.remove('active');
+    if (button.classList.contains('itinerary-nav-chip')) button.setAttribute('aria-current', 'false');
+  });
+  document.querySelectorAll('[data-action="jump-itinerary-overview"][data-workspace="' + workspace + '"]').forEach((button) => {
+    button.classList.add('active');
+    button.setAttribute('aria-current', 'location');
+  });
 }
 
 function jumpToItineraryDay(workspace, dayIndex) {
   state.activeItineraryDay = Math.max(0, Number(dayIndex) || 0);
   const selector = '#' + workspace + '-day-' + state.activeItineraryDay;
-  render();
+  updateItineraryNavigation(workspace, state.activeItineraryDay);
   requestAnimationFrame(() => document.querySelector(selector)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 
 function jumpToItineraryOverview(workspace) {
   state.activeItineraryDay = 0;
-  render();
+  updateItineraryOverviewNavigation(workspace);
   requestAnimationFrame(() => document.querySelector('#' + workspace + '-overview')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 
@@ -1196,21 +1370,18 @@ function syncActiveItineraryDay() {
   const current = atDocumentEnd ? days[days.length - 1] : days.reduce((closest, day) => {
     const top = day.getBoundingClientRect().top;
     if (top <= marker) return day;
-    return closest || day;
+    return closest;
   }, null);
+  if (!current) {
+    updateItineraryOverviewNavigation(workspace);
+    return;
+  }
   const next = Number(current?.dataset.itineraryDay);
-  if (!Number.isInteger(next) || next === state.activeItineraryDay) return;
+  if (!Number.isInteger(next)) return;
+  const activeChip = document.querySelector('.itinerary-nav-chip.active[data-action="jump-itinerary-day"][data-workspace="' + workspace + '"][data-day-index="' + next + '"]');
+  if (next === state.activeItineraryDay && activeChip) return;
   state.activeItineraryDay = next;
-  document.querySelectorAll('[data-action="jump-itinerary-day"]').forEach((button) => {
-    if (Number(button.dataset.dayIndex) !== next) return;
-    button.classList.add('active');
-    button.setAttribute('aria-current', 'step');
-  });
-  document.querySelectorAll('[data-action="jump-itinerary-day"]').forEach((button) => {
-    if (Number(button.dataset.dayIndex) === next) return;
-    button.classList.remove('active');
-    button.setAttribute('aria-current', 'false');
-  });
+  updateItineraryNavigation(workspace, next);
 }
 
 function scheduleItineraryScrollSync() {
@@ -1219,8 +1390,44 @@ function scheduleItineraryScrollSync() {
 }
 
 function renderResetConfirmation() {
-  $('#modal-root').innerHTML = '<div class="modal-backdrop"><section class="modal reset-modal" role="dialog" aria-modal="true" aria-labelledby="reset-itinerary-title" aria-describedby="reset-itinerary-description"><button class="modal-close" type="button" data-action="cancel-reset-itinerary" aria-label="Đóng cửa sổ">×</button><div class="kicker">HOÀN TÁC CHỈNH SỬA</div><h2 id="reset-itinerary-title">Đặt lại lịch trình?</h2><p id="reset-itinerary-description">Những thay đổi chưa lưu về giờ, thời lượng, thứ tự và ngày sẽ được hoàn tác. Lịch trình trở về phiên bản đã lưu gần nhất.</p><div class="modal-actions"><button class="button button-ghost" type="button" data-action="cancel-reset-itinerary">Hủy</button><button class="button button-primary" type="button" data-action="confirm-reset-itinerary">Đặt lại</button></div></section></div>';
-  requestAnimationFrame(() => $('[data-action="confirm-reset-itinerary"]')?.focus());
+  $('#modal-root').innerHTML = '<div class="modal-backdrop"><section class="modal reset-modal" role="dialog" aria-modal="true" aria-labelledby="reset-itinerary-title" aria-describedby="reset-itinerary-description"><button class="modal-close" type="button" data-action="cancel-reset-itinerary" aria-label="Đóng cửa sổ">×</button><div class="kicker">HOÀN TÁC CHỈNH SỬA</div><h2 id="reset-itinerary-title">Đặt lại lịch trình?</h2><p id="reset-itinerary-description">Những thay đổi chưa lưu về giờ, thời lượng, thứ tự và ngày sẽ được hoàn tác. Lịch trình trở về phiên bản đã lưu gần nhất.</p><div class="modal-actions"><button class="button button-ghost" type="button" data-action="cancel-reset-itinerary">Giữ chỉnh sửa</button><button class="button button-warning" type="button" data-action="confirm-reset-itinerary">Hoàn tác chỉnh sửa</button></div></section></div>';
+  setOverlayState(true);
+  requestAnimationFrame(() => $('.modal-actions [data-action="cancel-reset-itinerary"]')?.focus());
+}
+
+function renderConfirmDialog() {
+  const dialog = state.confirmDialog;
+  if (!dialog) return;
+  $('#modal-root').innerHTML = '<div class="modal-backdrop"><section class="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-description"><button class="modal-close" type="button" data-action="cancel-confirm" aria-label="Đóng cửa sổ">×</button><div class="kicker">XÁC NHẬN THAO TÁC</div><h2 id="confirm-dialog-title">' + escapeHtml(dialog.title) + '</h2><p id="confirm-dialog-description">' + escapeHtml(dialog.description) + '</p><div class="modal-actions"><button class="button button-ghost" type="button" data-action="cancel-confirm">Giữ lại</button><button class="button button-danger" type="button" data-action="confirm-destructive">' + escapeHtml(dialog.confirmLabel) + '</button></div></section></div>';
+  setOverlayState(true);
+  requestAnimationFrame(() => $('.modal-actions [data-action="cancel-confirm"]')?.focus());
+}
+
+function openConfirmDialog(dialog) {
+  lastModalTrigger = document.activeElement;
+  state.confirmDialog = dialog;
+  renderConfirmDialog();
+}
+
+function closeConfirmDialog(restoreFocus = true) {
+  state.confirmDialog = null;
+  $('#modal-root').innerHTML = '';
+  setOverlayState(false);
+  if (state.reviewDetail) {
+    renderPlaceReviewModal();
+    return;
+  }
+  if (restoreFocus && lastModalTrigger instanceof HTMLElement) lastModalTrigger.focus();
+}
+
+async function confirmDestructiveAction() {
+  const dialog = state.confirmDialog;
+  if (!dialog) return;
+  state.confirmDialog = null;
+  $('#modal-root').innerHTML = '';
+  setOverlayState(false);
+  if (dialog.kind === 'plan') await performDeletePlan(dialog.id);
+  if (dialog.kind === 'review') await performDeleteReview(dialog.id);
 }
 
 function openResetConfirmation() {
@@ -1233,14 +1440,14 @@ function openResetConfirmation() {
 function closeResetConfirmation(restoreFocus = true) {
   state.resetConfirmOpen = false;
   $('#modal-root').innerHTML = '';
+  setOverlayState(false);
   if (restoreFocus && lastModalTrigger instanceof HTMLElement) lastModalTrigger.focus();
 }
 
 function confirmResetItinerary() {
   const restored = window.PinkTripItineraryState.restoreBaseline(state.itineraryBaseline);
   if (!restored || !state.generated) return closeResetConfirmation();
-  clearTimeout(itineraryNormalizeTimer);
-  itineraryMutationVersion += 1;
+  resetItineraryNormalization();
   const activeDay = Math.min(Math.max(0, state.activeItineraryDay), Math.max(0, restored.itinerary.length - 1));
   state.generated.itinerary = restored.itinerary;
   state.generated.budget = restored.budget;
@@ -1256,7 +1463,16 @@ function confirmResetItinerary() {
 
 async function deletePlan(id) {
   const plan = state.plans.find((item) => item.id === id) || state.activeTrip;
-  if (!window.confirm('Xóa “' + (plan?.title || 'chuyến đi này') + '”?')) return;
+  openConfirmDialog({
+    kind: 'plan',
+    id,
+    title: 'Xóa chuyến đi này?',
+    description: '“' + (plan?.title || 'Chuyến đi này') + '” và toàn bộ lịch trình đã lưu sẽ bị xóa vĩnh viễn.',
+    confirmLabel: 'Xóa chuyến đi'
+  });
+}
+
+async function performDeletePlan(id) {
   try {
     await api('/api/plans/' + encodeURIComponent(id), { method: 'DELETE' });
     await refreshPlans();
@@ -1281,15 +1497,39 @@ function moveCandidate(fromDay, index, toDay, toIndex = null) {
 }
 
 async function normalizeEditor(candidate, selectedIds = state.draft.selectedPlaceIds) {
+  const requestContext = itineraryRequestContext;
   const requestVersion = ++itineraryMutationVersion;
-  const result = await api('/api/plans/recalculate', {
-    method: 'POST',
-    body: { itinerary: candidate, ...state.draft, selectedPlaceIds: selectedIds }
-  });
-  if (requestVersion !== itineraryMutationVersion) return;
-  state.generated.itinerary = result.itinerary;
-  state.generated.budget = result.budget;
-  renderPlanner();
+  itineraryRequestsInFlight += 1;
+  state.itineraryBusy = true;
+  document.querySelector('.itinerary-editor-panel')?.setAttribute('aria-busy', 'true');
+  document.querySelectorAll('.itinerary-editor-panel button, .itinerary-editor-panel select').forEach((control) => { control.disabled = true; });
+  try {
+    const result = await api('/api/plans/recalculate', {
+      method: 'POST',
+      body: { itinerary: candidate, ...state.draft, selectedPlaceIds: selectedIds }
+    });
+    if (requestContext !== itineraryRequestContext || requestVersion !== itineraryMutationVersion) return;
+    state.generated.itinerary = result.itinerary;
+    state.generated.budget = result.budget;
+  } catch (error) {
+    if (requestContext === itineraryRequestContext && requestVersion === itineraryMutationVersion) throw error;
+  } finally {
+    if (requestContext === itineraryRequestContext) {
+      itineraryRequestsInFlight = Math.max(0, itineraryRequestsInFlight - 1);
+      if (itineraryRequestsInFlight === 0) {
+        state.itineraryBusy = false;
+        renderPlanner();
+      }
+    }
+  }
+}
+
+function resetItineraryNormalization() {
+  clearTimeout(itineraryNormalizeTimer);
+  itineraryNormalizeTimer = null;
+  itineraryRequestContext += 1;
+  itineraryRequestsInFlight = 0;
+  state.itineraryBusy = false;
 }
 
 function scheduleEditorNormalization(delay = 300) {
@@ -1339,20 +1579,32 @@ function replanCompletedItems() {
   return items.length ? '<fieldset class="completed-list" aria-describedby="completed-activities-hint"><legend><span class="replan-section-index" aria-hidden="true">1</span>Hoạt động đã hoàn thành</legend><p class="completed-list-hint" id="completed-activities-hint">Chọn những hoạt động bạn đã hoàn thành. PinkTrip sẽ giữ nguyên chúng khi điều chỉnh lịch trình.</p><div>' + items.map(({ item }) => '<label class="completed-row" for="replan-completed-' + escapeHtml(item.id) + '"><input id="replan-completed-' + escapeHtml(item.id) + '" type="checkbox" data-replan-completed="' + escapeHtml(item.id) + '" ' + (state.replanDraft.completedItemIds.includes(item.id) ? 'checked' : '') + '><span class="completed-row-copy"><span class="completed-row-title">' + escapeHtml(item.title) + '</span><span class="completed-row-note">Được giữ nguyên</span></span></label>').join('') + '</div></fieldset>' : '';
 }
 
+function replanChangeText(change) {
+  const title = String(change.title || '').replace(/[.:]\s*$/, '');
+  if (change.kind === 'removed') {
+    const reason = change.reason === 'unavailable' ? 'địa điểm không còn hoạt động' : change.reason === 'skipped' ? 'bỏ qua theo yêu cầu' : 'chưa có chỗ phù hợp';
+    return title + ': ' + reason;
+  }
+  if (change.kind === 'moved') return title + ': Ngày ' + (change.fromDay + 1) + ' → Ngày ' + (change.toDay + 1);
+  if (change.kind === 'time') return title + ': ' + (change.fromTime || '') + ' → ' + change.toTime;
+  return title;
+}
+
 function renderReplanModal() {
   if (!state.replanOpen) return;
   const draft = state.replanDraft || defaultReplanDraft();
   state.replanDraft = draft;
   const typeOptions = replanTypes().map(([id, label]) => '<option value="' + id + '" ' + (draft.type === id ? 'selected' : '') + '>' + label + '</option>').join('');
-  let body = '<form data-form="replan">' + replanCompletedItems() + '<section class="replan-disruption" aria-labelledby="replan-disruption-heading"><div class="replan-section-heading"><span class="replan-section-index" aria-hidden="true">2</span><h3 id="replan-disruption-heading">Điều gì đã thay đổi?</h3></div><p class="replan-section-hint">Thông tin này giúp PinkTrip sắp xếp lại phần lịch trình còn lại.</p><div class="field"><label for="replan-type">Thay đổi</label><select id="replan-type" data-replan-field="type">' + typeOptions + '</select></div><div class="field"><label for="replan-day">Ngày bị ảnh hưởng</label><select id="replan-day" data-replan-field="dayIndex">' + (state.generated?.itinerary || []).map((day, index) => '<option value="' + index + '" ' + (index === Number(draft.dayIndex) ? 'selected' : '') + '>Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</option>').join('') + '</select></div>' + replanOptions() + '</section><div class="field"><label for="replan-note">Ghi chú thêm <span class="optional">(không bắt buộc)</span></label><textarea id="replan-note" data-replan-field="note" placeholder="Ví dụ: Ưu tiên nghỉ ngơi và tránh di chuyển xa"></textarea></div><div class="error-message" id="replan-error" aria-live="polite"></div><button class="button button-primary" type="submit">Tạo phương án mới <span>↗</span></button></form>';
+  let body = '<form data-form="replan" aria-busy="' + state.replanLoading + '">' + replanCompletedItems() + '<section class="replan-disruption" aria-labelledby="replan-disruption-heading"><div class="replan-section-heading"><span class="replan-section-index" aria-hidden="true">2</span><h3 id="replan-disruption-heading">Điều gì đã thay đổi?</h3></div><p class="replan-section-hint">Thông tin này giúp PinkTrip sắp xếp lại phần lịch trình còn lại.</p><div class="field"><label for="replan-type">Thay đổi</label><select id="replan-type" data-replan-field="type">' + typeOptions + '</select></div><div class="field"><label for="replan-day">Ngày bị ảnh hưởng</label><select id="replan-day" data-replan-field="dayIndex">' + (state.generated?.itinerary || []).map((day, index) => '<option value="' + index + '" ' + (index === Number(draft.dayIndex) ? 'selected' : '') + '>Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</option>').join('') + '</select></div>' + replanOptions() + '</section><div class="field"><label for="replan-note">Ghi chú thêm <span class="optional">(không bắt buộc)</span></label><textarea id="replan-note" data-replan-field="note" placeholder="Ví dụ: Ưu tiên nghỉ ngơi và tránh di chuyển xa"></textarea></div><div class="error-message" id="replan-error" aria-live="polite"></div><button class="button button-primary' + (state.replanLoading ? ' is-loading' : '') + '" type="submit"' + (state.replanLoading ? ' disabled' : '') + '>' + (state.replanLoading ? 'Đang tạo phương án…' : 'Tạo phương án mới <span>↗</span>') + '</button></form>';
   if (state.replanPreview) {
     const changes = state.replanPreview.changes || [];
     const protectedItems = currentItems().filter(({ item }) => draft.completedItemIds.includes(item.id));
     const protectedIds = new Set(protectedItems.map(({ item }) => item.id));
     const protectedSummary = protectedItems.length ? '<section class="protected-summary" aria-labelledby="protected-summary-heading"><div><span class="protected-summary-icon" aria-hidden="true">✓</span><h3 id="protected-summary-heading">Được giữ nguyên</h3></div><p>' + protectedItems.map(({ item }) => escapeHtml(item.title)).join(' · ') + '</p></section>' : '';
-    body = '<div class="replan-preview"><div class="preview-intro"><strong>Phương án dựa trên lịch trình hiện tại</strong><span>PinkTrip giữ nguyên những hoạt động đã hoàn thành và chỉ sắp xếp phần còn lại.</span></div>' + protectedSummary + '<div class="change-summary"><h3>Thay đổi dự kiến</h3>' + changes.map((change) => '<div class="change-row"><span class="change-icon" aria-hidden="true">' + (change.kind === 'removed' ? '!' : change.kind === 'moved' ? '↗' : change.kind === 'time' ? '◷' : '✓') + '</span><span>' + escapeHtml(change.title) + ': ' + (change.kind === 'removed' ? (change.reason === 'unavailable' ? 'địa điểm không còn hoạt động' : change.reason === 'skipped' ? 'bỏ qua theo yêu cầu' : 'chưa có chỗ phù hợp') : change.kind === 'moved' ? 'Ngày ' + (change.fromDay + 1) + ' → Ngày ' + (change.toDay + 1) : change.kind === 'time' ? (change.fromTime || '') + ' → ' + change.toTime : 'giữ nguyên') + '</span></div>').join('') + '</div><div class="preview-budget"><span>Ngân sách dự kiến sau điều chỉnh</span><strong>' + money(state.replanPreview.budget?.total) + '</strong><small>' + money(state.replanPreview.budget?.perPerson) + ' mỗi người</small></div><div class="preview-itinerary"><h3>Lịch trình xem trước</h3>' + (state.replanPreview.days || []).map((day, index) => readonlyDay(day, index, protectedIds)).join('') + '</div><div class="preview-actions"><button class="button button-ghost" type="button" data-action="cancel-replan">Giữ lịch trình hiện tại</button><button class="button button-primary" type="button" data-action="apply-replan">Áp dụng lịch trình mới</button></div></div>';
+    body = '<div class="replan-preview"><div class="preview-intro"><strong>Phương án dựa trên lịch trình hiện tại</strong><span>PinkTrip giữ nguyên những hoạt động đã hoàn thành và chỉ sắp xếp phần còn lại.</span></div>' + protectedSummary + '<div class="change-summary"><h3>Thay đổi dự kiến</h3>' + changes.map((change) => '<div class="change-row"><span class="change-icon" aria-hidden="true">' + (change.kind === 'removed' ? '!' : change.kind === 'moved' ? '↗' : change.kind === 'time' ? '◷' : '✓') + '</span><span>' + escapeHtml(replanChangeText(change)) + '</span></div>').join('') + '</div><div class="preview-budget"><span>Ngân sách dự kiến sau điều chỉnh</span><strong>' + money(state.replanPreview.budget?.total) + '</strong><small>' + money(state.replanPreview.budget?.perPerson) + ' mỗi người</small></div><div class="preview-itinerary"><h3>Lịch trình xem trước</h3>' + (state.replanPreview.days || []).map((day, index) => readonlyDay(day, index, protectedIds)).join('') + '</div><div class="preview-actions"><button class="button button-ghost" type="button" data-action="cancel-replan">Giữ lịch trình hiện tại</button><button class="button button-primary" type="button" data-action="apply-replan">Áp dụng lịch trình mới</button></div></div>';
   }
   $('#modal-root').innerHTML = '<div class="modal-backdrop replan-backdrop"><section class="modal replan-modal" role="dialog" aria-modal="true" aria-labelledby="replan-title"><button class="modal-close" type="button" data-action="close-replan" aria-label="Đóng cửa sổ">×</button><div class="kicker">ĐIỀU CHỈNH LỊCH TRÌNH</div><h2 id="replan-title">Có thay đổi trong chuyến đi?</h2><p>' + (state.replanPreview ? 'Xem lại đề xuất trước khi áp dụng vào lịch trình hiện tại.' : 'Cho PinkTrip biết điều gì xảy ra. Phương án sẽ chỉ thay đổi phần còn lại.') + '</p>' + body + '</section></div>';
+  setOverlayState(true);
 }
 
 function openReplan() {
@@ -1368,20 +1620,28 @@ function closeReplan(restoreFocus = true) {
   state.replanOpen = false;
   state.replanPreview = null;
   state.replanDraft = null;
+  state.replanLoading = false;
   $('#modal-root').innerHTML = '';
+  setOverlayState(false);
   if (restoreFocus && lastModalTrigger instanceof HTMLElement) lastModalTrigger.focus();
 }
 
 async function submitReplan() {
+  if (state.replanLoading) return;
+  state.replanLoading = true;
+  renderReplanModal();
   try {
     const result = await api('/api/plans/replan', {
       method: 'POST',
       body: { planId: state.editingPlanId || undefined, currentItinerary: clone(state.generated.itinerary), ...state.draft, disruption: state.replanDraft }
     });
     state.replanPreview = result;
+    state.replanLoading = false;
     renderReplanModal();
     requestAnimationFrame(() => $('.preview-actions button')?.focus());
   } catch (error) {
+    state.replanLoading = false;
+    renderReplanModal();
     const errorBox = $('#replan-error');
     if (errorBox) errorBox.textContent = error.message;
     else toast(error.message);
@@ -1411,6 +1671,15 @@ async function applyReplan() {
 
 async function handleAction(target) {
   const action = target.dataset.action;
+  if (action === 'skip-to-content') {
+    const main = document.querySelector('main');
+    main?.focus({ preventScroll: true });
+    main?.scrollIntoView({ block: 'start' });
+    return;
+  }
+  if (action === 'toast-action') return runToastAction();
+  if (action === 'cancel-confirm') return closeConfirmDialog();
+  if (action === 'confirm-destructive') return confirmDestructiveAction();
   if (action === 'open-date-picker') return openDatePicker(target.dataset.dateRole);
   if (action === 'close-date-picker') return closeDatePicker(true);
   if (action === 'select-date') return selectDate(target.dataset.date);
@@ -1445,6 +1714,7 @@ async function handleAction(target) {
     const filters = state.route.reviewFilters || state.reviewBrowse.filters;
     return navigateReviews({ ...filters, page: Math.max(1, Number(target.dataset.page) || 1) });
   }
+  if (action === 'clear-review-filters') return navigateReviews({ destinationId: '', placeId: '', rating: '', sort: 'newest', page: 1 });
   if (action === 'reviews-back') {
     if (window.history.length > 1) return window.history.back();
     return navigate('/');
@@ -1465,6 +1735,12 @@ async function handleAction(target) {
   }
   if (action === 'clear-interests') {
     state.draft.interests = [];
+    state.placeVisibleCount = 12;
+    return renderPlanner();
+  }
+  if (action === 'clear-place-filters') {
+    state.draft.interests = [];
+    state.placeSearch = '';
     state.placeVisibleCount = 12;
     return renderPlanner();
   }
@@ -1497,21 +1773,31 @@ async function handleAction(target) {
     return renderPlanner();
   }
   if (action === 'next-step') {
-    if (!String(state.draft.title || '').trim()) return toast('Hãy nhập tên chuyến đi.');
-    const dateError = dateValidationMessage();
-    if (dateError) return toast(dateError);
-    const travelers = Number(state.draft.travelers);
-    if (!Number.isInteger(travelers) || travelers < 1 || travelers > 12) return toast('Số người cần nằm trong khoảng 1–12.');
-    const budgetError = budgetValidationMessage();
-    if (budgetError) return toast(budgetError);
+    if (state.step === 0) {
+      const errors = validateStepOne();
+      if (Object.keys(errors).length) {
+        renderPlanner();
+        requestAnimationFrame(() => document.querySelector('[aria-invalid="true"]')?.focus());
+        return toast('Kiểm tra lại các thông tin được đánh dấu.');
+      }
+    }
     if (state.step === 1 && !state.draft.selectedPlaceIds.length) return toast('Hãy chọn ít nhất một địa điểm để tạo lịch trình');
     state.step += 1;
-    if (state.step === 3) return state.generated && state.generatedSignature === draftSignature() ? renderPlanner() : generate();
-    return renderPlanner();
+    if (state.step === 3) {
+      if (state.generated && state.generatedSignature === draftSignature()) {
+        renderPlanner();
+        focusPlannerStep();
+        return;
+      }
+      return generate();
+    }
+    renderPlanner();
+    return focusPlannerStep();
   }
   if (action === 'prev-step') {
     state.step = Math.max(0, state.step - 1);
-    return renderPlanner();
+    renderPlanner();
+    return focusPlannerStep();
   }
   if (action === 'regenerate') return generate();
   if (action === 'save-plan') return savePlan();
@@ -1544,10 +1830,20 @@ async function handleAction(target) {
     const day = Number(target.dataset.day);
     const index = Number(target.dataset.index);
     const item = state.generated.itinerary[day]?.items[index];
+    const previous = clone(state.generated.itinerary);
     const candidate = clone(state.generated.itinerary);
     candidate[day].items.splice(index, 1);
     try {
       await normalizeEditor(candidate);
+      toast('Đã xóa ' + (item?.title || 'hoạt động') + ' khỏi lịch trình.', {
+        actionLabel: 'Hoàn tác',
+        onAction: async () => {
+          try {
+            await normalizeEditor(previous);
+            toast('Đã khôi phục hoạt động.');
+          } catch (error) { toast(error.message); }
+        }
+      });
     } catch (error) {
       toast(error.message);
     }
@@ -1565,6 +1861,7 @@ document.addEventListener('click', async (event) => {
   }
   const target = event.target.closest('[data-action]');
   if (!target || target.tagName === 'SELECT') return;
+  if (target.dataset.action === 'skip-to-content') event.preventDefault();
   await handleAction(target);
 });
 
@@ -1593,6 +1890,12 @@ document.addEventListener('input', (event) => {
   if (field) {
     state.draft[field] = target.type === 'number' ? Number(target.value) : target.value;
     if (field === 'travelers') updateBudgetPerPersonText();
+    if (state.plannerErrors[field]) {
+      delete state.plannerErrors[field];
+      target.setAttribute('aria-invalid', 'false');
+      target.closest('.field')?.classList.remove('has-error');
+      target.closest('.field')?.querySelector('.field-error')?.remove();
+    }
   }
   const reviewField = target.dataset.reviewField;
   if (reviewField) {
@@ -1714,16 +2017,28 @@ document.addEventListener('submit', async (event) => {
   }
   const data = Object.fromEntries(new FormData(form));
   if (form.dataset.form === 'auth') {
+    if (form.dataset.submitting === 'true') return;
+    const submitButton = form.querySelector('button[type="submit"]');
+    const originalLabel = submitButton?.innerHTML;
+    form.dataset.submitting = 'true';
+    form.setAttribute('aria-busy', 'true');
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.classList.add('is-loading');
+      submitButton.textContent = data.mode === 'login' ? 'Đang đăng nhập…' : 'Đang tạo tài khoản…';
+    }
     try {
       const result = await api('/api/auth/' + data.mode, { method: 'POST', body: data });
       state.user = result.user;
-      state.draft = defaultDraft();
+      state.draft = defaultDraft(state.pendingTripDestinationId || undefined);
       syncBudgetInput(state.draft.targetBudget);
       $('#modal-root').innerHTML = '';
+      setOverlayState(false);
       await refreshPlans();
       const pending = state.pendingPath;
       const pendingReview = state.pendingReviewContext;
       state.pendingPath = null;
+      state.pendingTripDestinationId = null;
       state.pendingReviewContext = null;
       toast(data.mode === 'login' ? 'Chào mừng trở lại ✦' : 'Tài khoản đã sẵn sàng ✦');
       if (pending) await navigate(pending);
@@ -1731,17 +2046,35 @@ document.addEventListener('submit', async (event) => {
         render();
         openReview(pendingReview);
       }
-      else render();
+      else await navigate('/dashboard');
     } catch (error) {
       form.querySelector('[data-auth-error]').textContent = error.message;
+    } finally {
+      if (form.isConnected) {
+        delete form.dataset.submitting;
+        form.removeAttribute('aria-busy');
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.classList.remove('is-loading');
+          submitButton.innerHTML = originalLabel;
+        }
+      }
     }
     return;
   }
   if (form.dataset.form === 'review') {
+    if (form.dataset.submitting === 'true') return;
     ensureReviewDraft();
     data.rating = state.reviewDraft.rating;
     const submitButton = form.querySelector('button[type="submit"]');
-    if (submitButton) submitButton.disabled = true;
+    const originalLabel = submitButton?.innerHTML;
+    form.dataset.submitting = 'true';
+    form.setAttribute('aria-busy', 'true');
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.classList.add('is-loading');
+      submitButton.textContent = state.reviewEditingId ? 'Đang lưu…' : 'Đang đăng…';
+    }
     try {
       const endpoint = state.reviewEditingId ? '/api/reviews/' + encodeURIComponent(state.reviewEditingId) : '/api/reviews';
       const method = state.reviewEditingId ? 'PUT' : 'POST';
@@ -1753,7 +2086,7 @@ document.addEventListener('submit', async (event) => {
       state.reviewEditingId = null;
       if (wasModal) closeReviewModal(false, false);
       await refreshReviewData();
-      if (returnPlaceId) await openPlaceReviews(returnPlaceId);
+      if (returnPlaceId) await openPlaceReviews(returnPlaceId, { preserveTrigger: true });
       else if (state.route.view === 'reviews') {
         const filters = { ...(state.route.reviewFilters || state.reviewBrowse.filters || {}) };
         if (filters.sort === 'newest') filters.page = 1;
@@ -1766,7 +2099,15 @@ document.addEventListener('submit', async (event) => {
       if (errorBox) errorBox.textContent = error.message;
       else toast(error.message);
     } finally {
-      if (form.isConnected && submitButton) submitButton.disabled = false;
+      if (form.isConnected) {
+        delete form.dataset.submitting;
+        form.removeAttribute('aria-busy');
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.classList.remove('is-loading');
+          submitButton.innerHTML = originalLabel;
+        }
+      }
     }
   }
 });
@@ -1774,6 +2115,9 @@ document.addEventListener('submit', async (event) => {
 function closeAuth() {
   $('#modal-root').innerHTML = '';
   state.pendingReviewContext = null;
+  state.pendingPath = null;
+  state.pendingTripDestinationId = null;
+  setOverlayState(false);
   if (lastAuthTrigger instanceof HTMLElement) lastAuthTrigger.focus();
 }
 
@@ -1794,6 +2138,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     if ($('#mobile-nav').classList.contains('is-open')) setMenu(false);
     if (state.datePickerOpen) closeDatePicker(true);
+    else if (state.confirmDialog) closeConfirmDialog();
     else if (state.resetConfirmOpen) closeResetConfirmation();
     else if (state.replanOpen) closeReplan();
     else if (state.reviewModalOpen) closeReviewModal();

@@ -9,6 +9,7 @@ const { buildPlanningResult } = require('../src/server');
 const ROOT = path.join(__dirname, '..');
 const destinations = require(path.join(ROOT, 'data/seed/destinations.json'));
 const places = require(path.join(ROOT, 'data/seed/places.json'));
+const services = require(path.join(ROOT, 'data/seed/services.json'));
 const travelTimes = require(path.join(ROOT, 'data/seed/travelTimes.json'));
 const VALID_CATEGORIES = new Set(['nature', 'beach', 'food', 'culture', 'photography', 'experience']);
 const VALID_TIMES = new Set(['morning', 'afternoon', 'evening', 'any']);
@@ -51,6 +52,19 @@ test('secondary categories participate in interest filtering', () => {
   const beachWithNature = places.find((place) => place.id === 'place-bai-kinh');
   assert.equal(beachWithNature.category, 'beach');
   assert.deepEqual(filterPlaces([beachWithNature], ['nature']).map((place) => place.id), ['place-bai-kinh']);
+});
+
+test('customer-facing place copy is complete and consistently Vietnamese', () => {
+  for (const place of places) {
+    assert.match(place.description, /[À-ỹĐđ]/u, `${place.id} has a Vietnamese description`);
+    assert.doesNotMatch(`${place.areaLabel} ${place.description}`, /\bexcursion\b|ngày chuyến đi|chuyến chuyến/i, `${place.id} has no unfinished mixed-language copy`);
+    for (const note of place.notes || []) assert.match(note, /[À-ỹĐđ]/u, `${place.id} has Vietnamese itinerary notes`);
+  }
+});
+
+test('destination and service descriptions are localized for the Vietnamese interface', () => {
+  for (const item of [...destinations, ...services]) assert.match(item.description, /[À-ỹĐđ]/u, `${item.id} has Vietnamese display copy`);
+  for (const item of destinations) assert.doesNotMatch(item.weather, /Sunny|Cloudy/i, `${item.id} has a localized weather label`);
 });
 
 test('each destination supplies unique, believable ten-day itineraries at each intensity', () => {

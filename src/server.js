@@ -70,7 +70,7 @@ async function readBody(req) {
   let body = '';
   for await (const chunk of req) body += chunk;
   if (!body) return {};
-  try { return JSON.parse(body); } catch { throw new Error('Invalid JSON body'); }
+  try { return JSON.parse(body); } catch { throw Object.assign(new Error('Nội dung JSON không hợp lệ'), { status: 400 }); }
 }
 
 function parseCookies(req) {
@@ -92,7 +92,7 @@ function publicUser(user) { return user ? { id: user.id, name: user.name, email:
 
 function requireFields(input, fields) {
   const missing = fields.filter((field) => input[field] === undefined || input[field] === null || input[field] === '');
-  if (missing.length) throw Object.assign(new Error(`Missing fields: ${missing.join(', ')}`), { status: 400 });
+  if (missing.length) throw Object.assign(new Error(`Thiếu thông tin bắt buộc: ${missing.join(', ')}`), { status: 400 });
 }
 
 async function relatedPlan(plan) {
@@ -154,7 +154,7 @@ async function buildPlanningResult(input) {
   requireFields(input, ['destinationId', 'startDate', 'endDate']);
   const planningInputs = validatePlanningInputs(input);
   const destination = await destinations.findById(input.destinationId);
-  if (!destination) throw Object.assign(new Error('Destination not found'), { status: 404 });
+  if (!destination) throw Object.assign(new Error('Không tìm thấy điểm đến'), { status: 404 });
   const allKnownPlaces = await places.all();
   const allPlaces = allKnownPlaces.filter((place) => place.destinationId === destination.id);
   const mappings = await inspirationLinks.all();
@@ -204,8 +204,8 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && pathname === '/api/auth/register') {
     requireFields(body, ['name', 'email', 'password']);
-    if (String(body.password).length < 8) throw Object.assign(new Error('Password must be at least 8 characters'), { status: 400 });
-    if (await users.findByEmail(String(body.email).trim())) throw Object.assign(new Error('An account with this email already exists'), { status: 409 });
+    if (String(body.password).length < 8) throw Object.assign(new Error('Mật khẩu phải có ít nhất 8 ký tự'), { status: 400 });
+    if (await users.findByEmail(String(body.email).trim())) throw Object.assign(new Error('Email này đã được dùng để tạo tài khoản'), { status: 409 });
     const created = await users.create({ name: String(body.name).trim().slice(0, 60), email: String(body.email).trim().toLowerCase(), passwordHash: hashPassword(String(body.password)), createdAt: new Date().toISOString() });
     const token = createToken();
     await sessions.create({ id: token, userId: created.id, expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString() });
@@ -217,7 +217,7 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && pathname === '/api/auth/login') {
     requireFields(body, ['email', 'password']);
     const found = await users.findByEmail(String(body.email).trim());
-    if (!found || !verifyPassword(String(body.password), found.passwordHash)) throw Object.assign(new Error('Email or password is incorrect'), { status: 401 });
+    if (!found || !verifyPassword(String(body.password), found.passwordHash)) throw Object.assign(new Error('Email hoặc mật khẩu không đúng'), { status: 401 });
     const token = createToken();
     await sessions.create({ id: token, userId: found.id, expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString() });
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'set-cookie': `pinktrip_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600` });
@@ -245,7 +245,7 @@ async function handleApi(req, res, url) {
     json(res, 200, { places: filteredPlaces, ratingSummaries: getPlaceRatingSummaries(await reviews.all(), filteredPlaces.map((item) => item.id)) }); return;
   }
   if (method === 'POST' && pathname === '/api/inspiration/resolve') {
-    if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
+    if (!user) throw Object.assign(new Error('Cần đăng nhập để tiếp tục'), { status: 401 });
     const match = resolveInspirationLink(body.url, await inspirationLinks.all(), await places.all());
     if (match.status === 'invalid') throw Object.assign(new Error('Vui lòng dán một đường link hợp lệ.'), { status: 400 });
     if (match.status === 'unsupported') { json(res, 200, { status: 'unsupported' }); return; }
@@ -278,7 +278,7 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'POST' && pathname === '/api/reviews') {
-    if (!user) throw Object.assign(new Error('Please log in to leave a review'), { status: 401 });
+    if (!user) throw Object.assign(new Error('Cần đăng nhập để viết đánh giá'), { status: 401 });
     const input = await validateReviewInput(body);
     const existing = await reviews.findByUserAndTarget(user.id, input.destinationId, input.placeId);
     if (existing) throw Object.assign(new Error('Bạn đã có một đánh giá cho mục này. Hãy chỉnh sửa đánh giá hiện có.'), { status: 409 });
@@ -288,10 +288,10 @@ async function handleApi(req, res, url) {
 
   const reviewMatch = pathname.match(/^\/api\/reviews\/([^/]+)$/);
   if (reviewMatch) {
-    if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
+    if (!user) throw Object.assign(new Error('Cần đăng nhập để tiếp tục'), { status: 401 });
     const reviewId = reviewMatch[1];
     const existing = await reviews.findOwnedById(reviewId, user.id);
-    if (!existing) throw Object.assign(new Error('Review not found'), { status: 404 });
+    if (!existing) throw Object.assign(new Error('Không tìm thấy đánh giá'), { status: 404 });
     if (method === 'DELETE') { await reviews.delete(reviewId); json(res, 200, { ok: true }); return; }
     if (method === 'PUT') {
       const input = await validateReviewInput(body);
@@ -300,22 +300,22 @@ async function handleApi(req, res, url) {
       const review = await reviews.update(reviewId, { ...input, authorName: user.name, userId: user.id, updatedAt: new Date().toISOString() });
       json(res, 200, { review }); return;
     }
-    throw Object.assign(new Error('Method not allowed'), { status: 405 });
+    throw Object.assign(new Error('Phương thức này không được hỗ trợ'), { status: 405 });
   }
 
   if (pathname === '/api/plans' && method === 'GET') {
-    if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
+    if (!user) throw Object.assign(new Error('Cần đăng nhập để tiếp tục'), { status: 401 });
     const ownPlans = await plans.findByUserId(user.id);
     json(res, 200, { plans: await Promise.all(ownPlans.map(relatedPlan)) }); return;
   }
 
   if (pathname === '/api/plans/generate' && method === 'POST') {
-    if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
+    if (!user) throw Object.assign(new Error('Cần đăng nhập để tiếp tục'), { status: 401 });
     json(res, 200, await buildPlanningResult(body)); return;
   }
 
   if (pathname === '/api/plans/recalculate' && method === 'POST') {
-    if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
+    if (!user) throw Object.assign(new Error('Cần đăng nhập để tiếp tục'), { status: 401 });
     requireFields(body, ['startDate', 'endDate']);
     const planningInputs = validatePlanningInputs(body);
     const itinerary = Array.isArray(body.itinerary) ? body.itinerary : [];
@@ -327,8 +327,8 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === '/api/plans/replan' && method === 'POST') {
-    if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
-    if (body.planId && !(await plans.findOwnedById(body.planId, user.id))) throw Object.assign(new Error('Trip not found'), { status: 404 });
+    if (!user) throw Object.assign(new Error('Cần đăng nhập để tiếp tục'), { status: 401 });
+    if (body.planId && !(await plans.findOwnedById(body.planId, user.id))) throw Object.assign(new Error('Không tìm thấy chuyến đi'), { status: 404 });
     requireFields(body, ['startDate', 'endDate']);
     const planningInputs = validatePlanningInputs(body);
     const itinerary = Array.isArray(body.currentItinerary) ? body.currentItinerary : [];
@@ -343,10 +343,10 @@ async function handleApi(req, res, url) {
 
   const planMatch = pathname.match(/^\/api\/plans\/([^/]+)$/);
   if (planMatch) {
-    if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
+    if (!user) throw Object.assign(new Error('Cần đăng nhập để tiếp tục'), { status: 401 });
     const planId = planMatch[1];
     const existing = await plans.findOwnedById(planId, user.id);
-    if (!existing) throw Object.assign(new Error('Trip not found'), { status: 404 });
+    if (!existing) throw Object.assign(new Error('Không tìm thấy chuyến đi'), { status: 404 });
     if (method === 'GET') { json(res, 200, { plan: await relatedPlan(existing) }); return; }
     if (method === 'DELETE') { await plans.delete(planId); json(res, 200, { ok: true }); return; }
     if (method === 'PUT') {
@@ -370,7 +370,7 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === '/api/plans' && method === 'POST') {
-    if (!user) throw Object.assign(new Error('Authentication required'), { status: 401 });
+    if (!user) throw Object.assign(new Error('Cần đăng nhập để tiếp tục'), { status: 401 });
     requireFields(body, ['title', 'destinationId', 'startDate', 'endDate']);
     const planningInputs = validatePlanningInputs(body);
     const generated = await buildPlanningResult(body);
@@ -382,7 +382,7 @@ async function handleApi(req, res, url) {
     json(res, 201, { plan: await relatedPlan(created) }); return;
   }
 
-  throw Object.assign(new Error('Not found'), { status: 404 });
+  throw Object.assign(new Error('Không tìm thấy nội dung yêu cầu'), { status: 404 });
 }
 
 async function serveStatic(req, res, url) {
@@ -401,7 +401,7 @@ async function serveStatic(req, res, url) {
       text(res, 200, shell, 'text/html; charset=utf-8');
       return;
     }
-    text(res, 404, 'Not found');
+    text(res, 404, 'Không tìm thấy');
   }
 }
 
@@ -412,7 +412,7 @@ async function requestHandler(req, res) {
     else await serveStatic(req, res, url);
   } catch (error) {
     const status = error.status || 500;
-    json(res, status, { error: status === 500 ? 'Something went wrong' : error.message });
+    json(res, status, { error: status === 500 ? 'Đã có lỗi xảy ra. Vui lòng thử lại.' : error.message });
   }
 }
 
