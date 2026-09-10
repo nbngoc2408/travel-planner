@@ -298,6 +298,11 @@ body.modal-open{overflow:hidden}
   .itinerary-editor-panel .itinerary-primary-actions .button-primary{grid-column:1/-1}
 }
 
+/* Keep the rotated landing postcard fully visible on narrow screens. */
+@media (max-width:767px){
+  .hero-art{height:clamp(410px,96vw,470px);min-height:410px}
+}
+
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}

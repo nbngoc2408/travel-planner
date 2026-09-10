@@ -107,6 +107,10 @@ test('landing markup keeps its primary actions balanced and localized', () => {
   assert.match(index, /LẬP KẾ HOẠCH · THEO CÁCH CỦA BẠN/);
 });
 
+test('landing hero artwork keeps the rotated postcard inside its mobile frame', () => {
+  assert.match(styles, /@media \(max-width:767px\)\{\s*\.hero-art\{height:clamp\(410px,96vw,470px\);min-height:410px\}\s*\}/);
+});
+
 test('user-facing authentication and fallback errors are localized', () => {
   assert.match(server, /Email hoặc mật khẩu không đúng/);
   assert.match(server, /Đã có lỗi xảy ra\. Vui lòng thử lại\./);
