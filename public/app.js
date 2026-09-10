@@ -2019,6 +2019,10 @@ document.addEventListener('click', async (event) => {
   if (!target || target.tagName === 'SELECT') return;
   if (target.dataset.action === 'skip-to-content') event.preventDefault();
   await handleAction(target);
+  // Pointer/touch activation should not leave a stale focus ring on the day
+  // chip after scroll-sync selects another day. Keyboard activation keeps
+  // focus so the selected and focus-visible states remain accessible.
+  if (event.detail > 0 && target.classList.contains('itinerary-nav-chip')) target.blur();
 });
 
 document.addEventListener('input', (event) => {

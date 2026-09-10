@@ -35,6 +35,7 @@ test('day navigator source keeps overview, reset, and replan state valid', () =>
   assert.match(app, /const dayCount = document\.querySelectorAll\('\[data-itinerary-day\]\[id\^="/);
   assert.match(app, /const activeDay = dayNavigation\.activeDayIndex\(Number\(dayIndex\), dayCount\);/);
   assert.match(app, /if \(activeDay === null\) return;/);
+  assert.match(app, /event\.detail > 0 && target\.classList\.contains\('itinerary-nav-chip'\)\) target\.blur\(\);/);
   assert.match(app, /function pauseItineraryScrollSync\(\)/);
   assert.match(app, /if \(itineraryScrollSyncPaused\) return;/);
   assert.match(app, /workspace === 'editor' && window\.matchMedia\('\(min-width: 768px\)'\)\.matches \? 240 : 180/);
