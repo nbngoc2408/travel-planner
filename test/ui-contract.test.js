@@ -33,6 +33,9 @@ test('responsive controls retain reachable actions and reduced-motion support', 
   assert.match(styles, /\.planner-card\.has-persistent-actions\{padding-bottom:108px\}/);
   assert.match(styles, /\.planner-actions-persistent\{position:fixed/);
   assert.match(styles, /\.itinerary-editor-panel>\.itinerary-sticky-actions\{top:auto;bottom:/);
+  assert.match(styles, /\.review-read-more\{min-height:44px/);
+  assert.match(styles, /\.pagination-pages\{justify-content:flex-start;gap:4px;overflow-x:auto/);
+  assert.match(styles, /\.toast button\{min-height:44px/);
   assert.match(styles, /@media \(prefers-reduced-motion:reduce\)/);
   assert.match(styles, /#planner-card\{scroll-margin-top:88px\}/);
 });
