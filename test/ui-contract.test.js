@@ -8,6 +8,43 @@ const app = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
 const styles = fs.readFileSync(path.join(ROOT, 'public/styles.css'), 'utf8');
 const index = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
 const server = fs.readFileSync(path.join(ROOT, 'src/server.js'), 'utf8');
+const dayNavigation = require(path.join(ROOT, 'public/itinerary-navigation.js'));
+
+test('day navigator has one exclusive current location for overview and every day', () => {
+  for (const selected of [null, 0, 1, 2]) {
+    const navigation = dayNavigation.navigationState(selected, 3);
+    const selectedCount = Number(navigation.overviewActive) + [0, 1, 2].filter((index) => index === navigation.activeDay).length;
+    assert.equal(selectedCount, 1);
+  }
+  assert.deepEqual(dayNavigation.navigationState(null, 3), { activeDay: null, overviewActive: true });
+  assert.deepEqual(dayNavigation.navigationState(1, 3), { activeDay: 1, overviewActive: false });
+  assert.equal(dayNavigation.activeDayIndex(-1, 3), null);
+  assert.equal(dayNavigation.activeDayIndex(3, 3), null);
+  assert.equal(dayNavigation.activeDayIndex(1, 0), null);
+});
+
+test('day navigator source keeps overview, reset, and replan state valid', () => {
+  assert.match(index, /<script src="\/itinerary-navigation\.js"><\/script>/);
+  assert.match(app, /activeItineraryDay: null/);
+  assert.match(app, /const navigation = dayNavigation\.navigationState\(state\.activeItineraryDay, days\.length\)/);
+  assert.match(app, /navigation\.overviewActive \? 'location' : 'false'/);
+  assert.match(app, /state\.activeItineraryDay = null;\n  updateItineraryOverviewNavigation/);
+  assert.match(app, /const activeDay = dayNavigation\.activeDayIndex\(state\.activeItineraryDay, restored\.itinerary\.length\)/);
+  assert.match(app, /state\.activeItineraryDay = dayNavigation\.activeDayIndex\(state\.activeItineraryDay, preview\.days\.length\)/);
+  assert.match(app, /function revealItineraryChip\(chip\)/);
+  assert.match(app, /const dayCount = document\.querySelectorAll\('\[data-itinerary-day\]\[id\^="/);
+  assert.match(app, /const activeDay = dayNavigation\.activeDayIndex\(Number\(dayIndex\), dayCount\);/);
+  assert.match(app, /if \(activeDay === null\) return;/);
+  assert.match(app, /function pauseItineraryScrollSync\(\)/);
+  assert.match(app, /if \(itineraryScrollSyncPaused\) return;/);
+  assert.match(app, /workspace === 'editor' && window\.matchMedia\('\(min-width: 768px\)'\)\.matches \? 240 : 180/);
+  assert.match(app, /window\.addEventListener\('scrollend', resumeItineraryScrollSync/);
+  assert.doesNotMatch(app, /active \? 'step' : 'false'/);
+  assert.match(styles, /\.itinerary-nav-chip:hover:not\(\[aria-current="location"\]\)/);
+  assert.match(styles, /\.itinerary-nav-chip\.active,\.itinerary-nav-chip\[aria-current="location"\]/);
+  assert.match(styles, /@media \(min-width:768px\)\{\.itinerary-editor-panel \.timeline-day\{scroll-margin-top:220px\}\}/);
+  assert.doesNotMatch(styles, /body\{min-width:320px/);
+});
 
 test('critical planning states remain explicit and recoverable', () => {
   assert.match(app, /aria-label="Tiến trình tạo chuyến đi"/);

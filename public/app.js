@@ -40,7 +40,7 @@ const state = {
   inspirationResolution: null,
   inspirationInput: '',
   itineraryView: 'detailed',
-  activeItineraryDay: 0,
+  activeItineraryDay: null,
   datePickerOpen: false,
   datePickerMonth: null,
   datePickerPhase: 'start',
@@ -58,6 +58,7 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 const plannerInputs = window.PinkTripPlannerInputs;
+const dayNavigation = window.PinkTripDayNavigation;
 const money = (value) => new Intl.NumberFormat('vi-VN').format(Math.round(value || 0)) + ' ₫';
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
 const formatDate = (value) => {
@@ -72,6 +73,8 @@ let lastAuthTrigger = null;
 let lastModalTrigger = null;
 let placeReviewTrigger = null;
 let itineraryScrollFrame = null;
+let itineraryScrollSyncPaused = false;
+let itineraryScrollSyncPauseTimer = null;
 let itineraryNormalizeTimer = null;
 let itineraryMutationVersion = 0;
 let itineraryRequestContext = 0;
@@ -598,10 +601,11 @@ function dayOverviewSummary(summary) {
 }
 
 function renderDayNavigator(days, workspace) {
-  const active = Math.min(Math.max(0, Number(state.activeItineraryDay) || 0), Math.max(0, days.length - 1));
-  return '<nav class="itinerary-day-nav" aria-label="Đi tới ngày trong lịch trình"><button class="itinerary-nav-chip" type="button" data-action="jump-itinerary-overview" data-workspace="' + workspace + '">Tổng quan</button><div class="itinerary-nav-scroll">' + days.map((day, index) => {
+  const navigation = dayNavigation.navigationState(state.activeItineraryDay, days.length);
+  return '<nav class="itinerary-day-nav" aria-label="Đi tới ngày trong lịch trình" data-itinerary-navigation="' + workspace + '"><button class="itinerary-nav-chip' + (navigation.overviewActive ? ' active' : '') + '" type="button" data-action="jump-itinerary-overview" data-workspace="' + workspace + '" aria-current="' + (navigation.overviewActive ? 'location' : 'false') + '">Tổng quan</button><div class="itinerary-nav-scroll">' + days.map((day, index) => {
     const summary = summarizeDay(day);
-    return '<button class="itinerary-nav-chip ' + (index === active ? 'active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '" aria-current="' + (index === active ? 'step' : 'false') + '" aria-label="Ngày ' + (index + 1) + (summary.hasActivities ? ', ' + activityLabel(summary.count) : ', chưa có hoạt động') + '">Ngày ' + (index + 1) + '</button>';
+    const isCurrent = index === navigation.activeDay;
+    return '<button class="itinerary-nav-chip' + (isCurrent ? ' active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '" aria-current="' + (isCurrent ? 'location' : 'false') + '" aria-label="Ngày ' + (index + 1) + (summary.hasActivities ? ', ' + activityLabel(summary.count) : ', chưa có hoạt động') + '">Ngày ' + (index + 1) + '</button>';
   }).join('') + '</div></nav>';
 }
 
@@ -619,6 +623,7 @@ function renderItineraryActions() {
 
 function renderItineraryOverview({ destination, startDate, endDate, travelers, intensity, budget, days, workspace, editable = false }) {
   const stats = itineraryStats(days);
+  const navigation = dayNavigation.navigationState(state.activeItineraryDay, days.length);
   const intensityText = intensityLabel(intensity);
   const metrics = [
     ['Ngày đi', days.length + ' ngày'],
@@ -626,7 +631,7 @@ function renderItineraryOverview({ destination, startDate, endDate, travelers, i
     ['Trung bình', stats.average + ' hoạt động/ngày'],
     ['Ngân sách', money(budget?.total)]
   ];
-  return '<section class="itinerary-workspace" id="' + workspace + '-overview"><div class="itinerary-overview-head"><div><span class="kicker">TỔNG QUAN CHUYẾN ĐI</span><h3>' + escapeHtml(destination?.name || 'Chuyến đi của bạn') + '</h3><p>' + formatDate(startDate) + ' → ' + formatDate(endDate) + ' · ' + travelers + ' người · ' + intensityText + '</p></div><div class="itinerary-view-toggle" role="group" aria-label="Mật độ hiển thị lịch trình">' + (editable ? '<button class="view-toggle ' + (state.itineraryView === 'detailed' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="detailed" aria-pressed="' + (state.itineraryView === 'detailed') + '">Chi tiết</button><button class="view-toggle ' + (state.itineraryView === 'compact' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="compact" aria-pressed="' + (state.itineraryView === 'compact') + '">Thu gọn</button>' : '<span class="itinerary-readonly-label">Chế độ xem</span>') + '</div></div><div class="itinerary-metrics">' + metrics.map(([label, value]) => '<div><small>' + label + '</small><strong>' + value + '</strong></div>').join('') + '</div><div class="itinerary-shape" aria-labelledby="' + workspace + '-shape-heading"><div><div><span class="kicker">NHỊP ĐỘ TỪNG NGÀY</span><h4 id="' + workspace + '-shape-heading">Toàn cảnh hành trình</h4></div><p>' + (stats.activeDays ? stats.activeDays + ' ngày có lịch · ' + activityLabel(stats.items.length) : 'Chưa có hoạt động nào') + '</p></div><div class="day-overview-list">' + days.map((day, index) => { const summary = summarizeDay(day); const stops = dayStops(day); return '<button class="day-overview-card ' + (index === Math.min(Math.max(0, Number(state.activeItineraryDay) || 0), Math.max(0, days.length - 1)) ? 'active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '"><span class="day-overview-label">Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</span><strong>' + escapeHtml(dayOverviewSummary(summary)) + '</strong>' + (stops ? '<small>' + escapeHtml(stops) + '</small>' : '') + (summary.route ? '<em>' + escapeHtml(summary.routeLabel + ': ' + summary.route) + '</em>' : '') + '</button>'; }).join('') + '</div></div></section>';
+  return '<section class="itinerary-workspace" id="' + workspace + '-overview"><div class="itinerary-overview-head"><div><span class="kicker">TỔNG QUAN CHUYẾN ĐI</span><h3>' + escapeHtml(destination?.name || 'Chuyến đi của bạn') + '</h3><p>' + formatDate(startDate) + ' → ' + formatDate(endDate) + ' · ' + travelers + ' người · ' + intensityText + '</p></div><div class="itinerary-view-toggle" role="group" aria-label="Mật độ hiển thị lịch trình">' + (editable ? '<button class="view-toggle ' + (state.itineraryView === 'detailed' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="detailed" aria-pressed="' + (state.itineraryView === 'detailed') + '">Chi tiết</button><button class="view-toggle ' + (state.itineraryView === 'compact' ? 'active' : '') + '" type="button" data-action="set-itinerary-view" data-view="compact" aria-pressed="' + (state.itineraryView === 'compact') + '">Thu gọn</button>' : '<span class="itinerary-readonly-label">Chế độ xem</span>') + '</div></div><div class="itinerary-metrics">' + metrics.map(([label, value]) => '<div><small>' + label + '</small><strong>' + value + '</strong></div>').join('') + '</div><div class="itinerary-shape" aria-labelledby="' + workspace + '-shape-heading"><div><div><span class="kicker">NHỊP ĐỘ TỪNG NGÀY</span><h4 id="' + workspace + '-shape-heading">Toàn cảnh hành trình</h4></div><p>' + (stats.activeDays ? stats.activeDays + ' ngày có lịch · ' + activityLabel(stats.items.length) : 'Chưa có hoạt động nào') + '</p></div><div class="day-overview-list">' + days.map((day, index) => { const summary = summarizeDay(day); const stops = dayStops(day); return '<button class="day-overview-card ' + (index === navigation.activeDay ? 'active' : '') + '" type="button" data-action="jump-itinerary-day" data-workspace="' + workspace + '" data-day-index="' + index + '"><span class="day-overview-label">Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</span><strong>' + escapeHtml(dayOverviewSummary(summary)) + '</strong>' + (stops ? '<small>' + escapeHtml(stops) + '</small>' : '') + (summary.route ? '<em>' + escapeHtml(summary.routeLabel + ': ' + summary.route) + '</em>' : '') + '</button>'; }).join('') + '</div></div></section>';
 }
 
 function renderTripDetail() {
@@ -1171,7 +1176,7 @@ function loadPlanIntoEditor(plan) {
   state.inspirationResolution = null;
   state.inspirationInput = '';
   state.itineraryView = 'detailed';
-  state.activeItineraryDay = 0;
+  state.activeItineraryDay = null;
 }
 
 async function applyRoute({ scroll = true } = {}) {
@@ -1237,6 +1242,7 @@ function navigate(path, options = {}) {
 
 async function generate() {
   if (state.generating) return;
+  state.activeItineraryDay = null;
   state.generating = true;
   renderPlanner();
   try {
@@ -1278,7 +1284,7 @@ function startNewTrip(id) {
   state.inspirationResolution = null;
   state.inspirationInput = '';
   state.itineraryView = 'detailed';
-  state.activeItineraryDay = 0;
+  state.activeItineraryDay = null;
   state.plannerErrors = {};
   state.generating = false;
   state.saving = false;
@@ -1320,7 +1326,19 @@ async function savePlan() {
   }
 }
 
-function updateItineraryNavigation(workspace, dayIndex) {
+function revealItineraryChip(chip) {
+  const strip = chip?.closest('.itinerary-nav-scroll');
+  if (!strip || !chip) return;
+  const stripRect = strip.getBoundingClientRect();
+  const chipRect = chip.getBoundingClientRect();
+  const padding = 8;
+  const leftDelta = chipRect.left - (stripRect.left + padding);
+  const rightDelta = chipRect.right - (stripRect.right - padding);
+  if (leftDelta < 0) strip.scrollTo({ left: Math.max(0, strip.scrollLeft + leftDelta), behavior: 'smooth' });
+  else if (rightDelta > 0) strip.scrollTo({ left: strip.scrollLeft + rightDelta, behavior: 'smooth' });
+}
+
+function updateItineraryNavigation(workspace, dayIndex, { reveal = false } = {}) {
   document.querySelectorAll('[data-action="jump-itinerary-overview"][data-workspace="' + workspace + '"]').forEach((button) => {
     button.classList.remove('active');
     button.setAttribute('aria-current', 'false');
@@ -1328,13 +1346,10 @@ function updateItineraryNavigation(workspace, dayIndex) {
   document.querySelectorAll('[data-action="jump-itinerary-day"][data-workspace="' + workspace + '"]').forEach((button) => {
     const active = Number(button.dataset.dayIndex) === dayIndex;
     button.classList.toggle('active', active);
-    if (button.classList.contains('itinerary-nav-chip')) button.setAttribute('aria-current', active ? 'step' : 'false');
+    if (button.classList.contains('itinerary-nav-chip')) button.setAttribute('aria-current', active ? 'location' : 'false');
   });
   const activeChip = document.querySelector('.itinerary-nav-chip[data-workspace="' + workspace + '"][data-day-index="' + dayIndex + '"]');
-  const strip = activeChip?.closest('.itinerary-nav-scroll');
-  if (strip && activeChip) {
-    strip.scrollTo({ left: Math.max(0, activeChip.offsetLeft - (strip.clientWidth - activeChip.clientWidth) / 2), behavior: 'smooth' });
-  }
+  if (reveal) revealItineraryChip(activeChip);
 }
 
 function updateItineraryOverviewNavigation(workspace) {
@@ -1348,25 +1363,48 @@ function updateItineraryOverviewNavigation(workspace) {
   });
 }
 
+function resumeItineraryScrollSync() {
+  clearTimeout(itineraryScrollSyncPauseTimer);
+  itineraryScrollSyncPauseTimer = null;
+  if (!itineraryScrollSyncPaused) return;
+  itineraryScrollSyncPaused = false;
+  scheduleItineraryScrollSync();
+}
+
+function pauseItineraryScrollSync() {
+  itineraryScrollSyncPaused = true;
+  clearTimeout(itineraryScrollSyncPauseTimer);
+  itineraryScrollSyncPauseTimer = setTimeout(resumeItineraryScrollSync, 1200);
+}
+
 function jumpToItineraryDay(workspace, dayIndex) {
-  state.activeItineraryDay = Math.max(0, Number(dayIndex) || 0);
+  const dayCount = document.querySelectorAll('[data-itinerary-day][id^="' + workspace + '-day-"]').length;
+  const activeDay = dayNavigation.activeDayIndex(Number(dayIndex), dayCount);
+  if (activeDay === null) return;
+  state.activeItineraryDay = activeDay;
   const selector = '#' + workspace + '-day-' + state.activeItineraryDay;
-  updateItineraryNavigation(workspace, state.activeItineraryDay);
+  updateItineraryNavigation(workspace, state.activeItineraryDay, { reveal: true });
+  pauseItineraryScrollSync();
   requestAnimationFrame(() => document.querySelector(selector)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 
 function jumpToItineraryOverview(workspace) {
-  state.activeItineraryDay = 0;
+  state.activeItineraryDay = null;
   updateItineraryOverviewNavigation(workspace);
+  pauseItineraryScrollSync();
   requestAnimationFrame(() => document.querySelector('#' + workspace + '-overview')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 
 function syncActiveItineraryDay() {
   itineraryScrollFrame = null;
+  if (itineraryScrollSyncPaused) return;
   const workspace = ['edit', 'new'].includes(state.route.view) ? 'editor' : 'detail';
   const days = [...document.querySelectorAll('[data-itinerary-day][id^="' + workspace + '-day-"]')];
   if (!days.length) return;
-  const marker = 180;
+  // Leave a small tolerance below the desktop sticky navigator/actions. The
+  // browser can place a section a fraction of a pixel below its scroll-margin,
+  // which would otherwise leave the previous day selected at the exact edge.
+  const marker = workspace === 'editor' && window.matchMedia('(min-width: 768px)').matches ? 240 : 180;
   const atDocumentEnd = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 8;
   const current = atDocumentEnd ? days[days.length - 1] : days.reduce((closest, day) => {
     const top = day.getBoundingClientRect().top;
@@ -1374,6 +1412,8 @@ function syncActiveItineraryDay() {
     return closest;
   }, null);
   if (!current) {
+    if (state.activeItineraryDay === null && document.querySelector('.itinerary-nav-chip[data-action="jump-itinerary-overview"][data-workspace="' + workspace + '"][aria-current="location"]')) return;
+    state.activeItineraryDay = null;
     updateItineraryOverviewNavigation(workspace);
     return;
   }
@@ -1382,7 +1422,7 @@ function syncActiveItineraryDay() {
   const activeChip = document.querySelector('.itinerary-nav-chip.active[data-action="jump-itinerary-day"][data-workspace="' + workspace + '"][data-day-index="' + next + '"]');
   if (next === state.activeItineraryDay && activeChip) return;
   state.activeItineraryDay = next;
-  updateItineraryNavigation(workspace, next);
+  updateItineraryNavigation(workspace, next, { reveal: true });
 }
 
 function scheduleItineraryScrollSync() {
@@ -1449,7 +1489,7 @@ function confirmResetItinerary() {
   const restored = window.PinkTripItineraryState.restoreBaseline(state.itineraryBaseline);
   if (!restored || !state.generated) return closeResetConfirmation();
   resetItineraryNormalization();
-  const activeDay = Math.min(Math.max(0, state.activeItineraryDay), Math.max(0, restored.itinerary.length - 1));
+  const activeDay = dayNavigation.activeDayIndex(state.activeItineraryDay, restored.itinerary.length);
   state.generated.itinerary = restored.itinerary;
   state.generated.budget = restored.budget;
   state.activeItineraryDay = activeDay;
@@ -1457,7 +1497,7 @@ function confirmResetItinerary() {
   renderPlanner();
   requestAnimationFrame(() => {
     document.querySelector('.itinerary-editor-panel [data-action="reset-itinerary"]')?.focus();
-    document.querySelector('#editor-day-' + activeDay)?.scrollIntoView({ block: 'nearest' });
+    document.querySelector(activeDay === null ? '#editor-overview' : '#editor-day-' + activeDay)?.scrollIntoView({ block: 'nearest' });
   });
   toast('Đã khôi phục lịch trình đã lưu.');
 }
@@ -1764,6 +1804,7 @@ async function applyReplan() {
   if (!preview) return;
   state.generated.itinerary = clone(preview.days);
   state.generated.budget = clone(preview.budget);
+  state.activeItineraryDay = dayNavigation.activeDayIndex(state.activeItineraryDay, preview.days.length);
   state.draft.selectedPlaceIds = [...(preview.selectedPlaceIds || state.draft.selectedPlaceIds)];
   const shouldPersist = Boolean(state.editingPlanId);
   closeReplan(false);
@@ -2305,6 +2346,7 @@ document.addEventListener('keydown', (event) => {
 
 window.addEventListener('popstate', () => applyRoute({ scroll: false }));
 window.addEventListener('scroll', scheduleItineraryScrollSync, { passive: true });
+window.addEventListener('scrollend', resumeItineraryScrollSync, { passive: true });
 window.addEventListener('resize', () => { if (state.replanPicker) positionReplanPicker(); });
 
 async function boot() {
