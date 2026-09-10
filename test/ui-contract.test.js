@@ -40,6 +40,27 @@ test('responsive controls retain reachable actions and reduced-motion support', 
   assert.match(styles, /#planner-card\{scroll-margin-top:88px\}/);
 });
 
+test('replan selectors use an accessible responsive picker instead of browser popups', () => {
+  assert.match(app, /function replanSelectOptions\(/);
+  assert.match(app, /function renderReplanPicker\(/);
+  assert.match(app, /function positionReplanPicker\(/);
+  assert.match(app, /const previousModalScrollTop = document\.querySelector\('\.replan-modal'\)\?\.scrollTop \|\| 0/);
+  assert.match(app, /nextModal\.scrollTop = modalScrollTop/);
+  assert.match(app, /role="listbox"/);
+  assert.match(app, /role="option" aria-selected=/);
+  assert.match(app, /data-action="select-replan-option"/);
+  assert.match(app, /state\.replanOpen && state\.replanPicker/);
+  assert.match(app, /window\.addEventListener\('resize', \(\) => \{ if \(state\.replanPicker\) positionReplanPicker\(\); \}\)/);
+  assert.doesNotMatch(app, /<select id="replan-(type|day|item)"/);
+  assert.match(styles, /\.replan-select-trigger\{[^}]*min-height:52px/);
+  assert.match(styles, /\.replan-picker-dialog\{[^}]*position:fixed/);
+  assert.match(styles, /\.replan-picker-option\{[^}]*min-height:52px/);
+  assert.match(styles, /\.replan-picker-option\[aria-selected="true"\]/);
+  assert.match(styles, /\.replan-picker-backdrop\{display:flex;align-items:flex-end/);
+  assert.match(styles, /env\(safe-area-inset-bottom\)/);
+  assert.match(styles, /\.replan-modal\{overflow-anchor:none\}/);
+});
+
 test('landing markup keeps its primary actions balanced and localized', () => {
   assert.equal((index.match(/<button\b/g) || []).length, (index.match(/<\/button>/g) || []).length);
   assert.match(index, /class="skip-link" href="#top"/);

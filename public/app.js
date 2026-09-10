@@ -34,6 +34,7 @@ const state = {
   pendingTripDestinationId: null,
   replanOpen: false,
   replanDraft: null,
+  replanPicker: null,
   replanPreview: null,
   resetConfirmOpen: false,
   inspirationResolution: null,
@@ -1562,6 +1563,25 @@ function defaultReplanDraft() {
   return { type: 'late-start', dayIndex: first?.dayIndex || 0, availableFrom: '11:00', delayMinutes: 60, itemId: first?.item.id || '', completedItemIds: [] };
 }
 
+function replanSelectOptions(field) {
+  if (field === 'type') return replanTypes().map(([value, label]) => ({ value, label }));
+  if (field === 'dayIndex') return (state.generated?.itinerary || []).map((day, index) => ({ value: String(index), label: 'Ngày ' + (index + 1), description: formatDate(day.date) }));
+  if (field === 'itemId') return currentItems().map(({ item, dayIndex }) => ({ value: item.id, label: item.title, description: 'Ngày ' + (dayIndex + 1) }));
+  return [];
+}
+
+function selectedReplanOption(field, value) {
+  return replanSelectOptions(field).find((option) => String(option.value) === String(value)) || replanSelectOptions(field)[0];
+}
+
+function renderReplanSelect({ id, field, label, value, hint = '' }) {
+  const selected = selectedReplanOption(field, value);
+  const expanded = state.replanPicker?.field === field;
+  const selectedLabel = selected ? selected.label : 'Chọn một lựa chọn';
+  const selectedDescription = selected?.description ? '<small>' + escapeHtml(selected.description) + '</small>' : '';
+  return '<div class="field replan-select-field"><label id="' + id + '-label" for="' + id + '">' + label + '</label><button id="' + id + '" class="replan-select-trigger" type="button" data-action="open-replan-picker" data-replan-picker-field="' + field + '" aria-haspopup="listbox" aria-expanded="' + expanded + '" aria-controls="replan-picker-list-' + field + '"><span class="replan-select-value"><strong>' + escapeHtml(selectedLabel) + '</strong>' + selectedDescription + '</span><span class="replan-select-chevron" aria-hidden="true">⌄</span></button>' + (hint ? '<small class="field-hint">' + hint + '</small>' : '') + '</div>';
+}
+
 function replanOptions() {
   const draft = state.replanDraft;
   const options = draft.type === 'late-start' || draft.type === 'rest' || draft.type === 'activity-overrun'
@@ -1569,9 +1589,22 @@ function replanOptions() {
     : '';
   const delay = draft.type === 'transport-delay' ? '<div class="field"><label for="replan-delay">Trễ khoảng bao lâu?</label><input id="replan-delay" type="number" min="15" step="15" data-replan-field="delayMinutes" value="' + (draft.delayMinutes || 60) + '" required><small class="field-hint">Số phút chậm trễ sẽ được cộng vào ngày bị ảnh hưởng.</small></div>' : '';
   const item = ['place-unavailable', 'skip'].includes(draft.type)
-    ? '<div class="field"><label for="replan-item">Địa điểm bị ảnh hưởng</label><select id="replan-item" data-replan-field="itemId" required><option value="">Chọn một địa điểm</option>' + currentItems().map(({ item: entry, dayIndex }) => '<option value="' + entry.id + '" ' + (entry.id === draft.itemId ? 'selected' : '') + '>' + escapeHtml(entry.title) + ' · Ngày ' + (dayIndex + 1) + '</option>').join('') + '</select></div>'
+    ? renderReplanSelect({ id: 'replan-item', field: 'itemId', label: 'Địa điểm bị ảnh hưởng', value: draft.itemId })
     : '';
   return options + delay + item;
+}
+
+function renderReplanPicker() {
+  const picker = state.replanPicker;
+  if (!picker) return '';
+  const labels = { type: 'Điều gì đã thay đổi?', dayIndex: 'Chọn ngày bị ảnh hưởng', itemId: 'Chọn địa điểm bị ảnh hưởng' };
+  const options = replanSelectOptions(picker.field);
+  const value = state.replanDraft?.[picker.field];
+  const list = options.map((option) => {
+    const selected = String(option.value) === String(value);
+    return '<button class="replan-picker-option" type="button" role="option" aria-selected="' + selected + '" data-action="select-replan-option" data-replan-picker-field="' + picker.field + '" data-replan-picker-value="' + escapeHtml(option.value) + '"><span class="replan-picker-check" aria-hidden="true">' + (selected ? '✓' : '') + '</span><span class="replan-picker-copy"><strong>' + escapeHtml(option.label) + '</strong>' + (option.description ? '<small>' + escapeHtml(option.description) + '</small>' : '') + '</span></button>';
+  }).join('');
+  return '<div class="replan-picker-backdrop" data-action="close-replan-picker"><section id="replan-picker-dialog" class="replan-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="replan-picker-title"><div class="replan-picker-grabber" aria-hidden="true"></div><div class="replan-picker-header"><div><span class="kicker">PINKTRIP</span><h2 id="replan-picker-title">' + labels[picker.field] + '</h2></div><button class="icon-button" type="button" data-action="close-replan-picker" aria-label="Đóng danh sách lựa chọn">×</button></div><div id="replan-picker-list-' + picker.field + '" class="replan-picker-list" role="listbox" aria-label="' + labels[picker.field] + '">' + list + '</div></section></div>';
 }
 
 function replanCompletedItems() {
@@ -1592,10 +1625,11 @@ function replanChangeText(change) {
 
 function renderReplanModal() {
   if (!state.replanOpen) return;
+  const previousModalScrollTop = document.querySelector('.replan-modal')?.scrollTop || 0;
+  const modalScrollTop = state.replanPicker?.modalScrollTop ?? previousModalScrollTop;
   const draft = state.replanDraft || defaultReplanDraft();
   state.replanDraft = draft;
-  const typeOptions = replanTypes().map(([id, label]) => '<option value="' + id + '" ' + (draft.type === id ? 'selected' : '') + '>' + label + '</option>').join('');
-  let body = '<form data-form="replan" aria-busy="' + state.replanLoading + '">' + replanCompletedItems() + '<section class="replan-disruption" aria-labelledby="replan-disruption-heading"><div class="replan-section-heading"><span class="replan-section-index" aria-hidden="true">2</span><h3 id="replan-disruption-heading">Điều gì đã thay đổi?</h3></div><p class="replan-section-hint">Thông tin này giúp PinkTrip sắp xếp lại phần lịch trình còn lại.</p><div class="field"><label for="replan-type">Thay đổi</label><select id="replan-type" data-replan-field="type">' + typeOptions + '</select></div><div class="field"><label for="replan-day">Ngày bị ảnh hưởng</label><select id="replan-day" data-replan-field="dayIndex">' + (state.generated?.itinerary || []).map((day, index) => '<option value="' + index + '" ' + (index === Number(draft.dayIndex) ? 'selected' : '') + '>Ngày ' + (index + 1) + ' · ' + formatDate(day.date) + '</option>').join('') + '</select></div>' + replanOptions() + '</section><div class="field"><label for="replan-note">Ghi chú thêm <span class="optional">(không bắt buộc)</span></label><textarea id="replan-note" data-replan-field="note" placeholder="Ví dụ: Ưu tiên nghỉ ngơi và tránh di chuyển xa"></textarea></div><div class="error-message" id="replan-error" aria-live="polite"></div><button class="button button-primary' + (state.replanLoading ? ' is-loading' : '') + '" type="submit"' + (state.replanLoading ? ' disabled' : '') + '>' + (state.replanLoading ? 'Đang tạo phương án…' : 'Tạo phương án mới <span>↗</span>') + '</button></form>';
+  let body = '<form data-form="replan" aria-busy="' + state.replanLoading + '">' + replanCompletedItems() + '<section class="replan-disruption" aria-labelledby="replan-disruption-heading"><div class="replan-section-heading"><span class="replan-section-index" aria-hidden="true">2</span><h3 id="replan-disruption-heading">Điều gì đã thay đổi?</h3></div><p class="replan-section-hint">Thông tin này giúp PinkTrip sắp xếp lại phần lịch trình còn lại.</p>' + renderReplanSelect({ id: 'replan-type', field: 'type', label: 'Thay đổi', value: draft.type }) + renderReplanSelect({ id: 'replan-day', field: 'dayIndex', label: 'Ngày bị ảnh hưởng', value: draft.dayIndex }) + replanOptions() + '</section><div class="field"><label for="replan-note">Ghi chú thêm <span class="optional">(không bắt buộc)</span></label><textarea id="replan-note" data-replan-field="note" placeholder="Ví dụ: Ưu tiên nghỉ ngơi và tránh di chuyển xa">' + escapeHtml(draft.note || '') + '</textarea></div><div class="error-message" id="replan-error" aria-live="polite"></div><button class="button button-primary replan-submit' + (state.replanLoading ? ' is-loading' : '') + '" type="submit"' + (state.replanLoading ? ' disabled' : '') + '>' + (state.replanLoading ? 'Đang tạo phương án…' : 'Tạo phương án mới <span>↗</span>') + '</button></form>';
   if (state.replanPreview) {
     const changes = state.replanPreview.changes || [];
     const protectedItems = currentItems().filter(({ item }) => draft.completedItemIds.includes(item.id));
@@ -1603,13 +1637,89 @@ function renderReplanModal() {
     const protectedSummary = protectedItems.length ? '<section class="protected-summary" aria-labelledby="protected-summary-heading"><div><span class="protected-summary-icon" aria-hidden="true">✓</span><h3 id="protected-summary-heading">Được giữ nguyên</h3></div><p>' + protectedItems.map(({ item }) => escapeHtml(item.title)).join(' · ') + '</p></section>' : '';
     body = '<div class="replan-preview"><div class="preview-intro"><strong>Phương án dựa trên lịch trình hiện tại</strong><span>PinkTrip giữ nguyên những hoạt động đã hoàn thành và chỉ sắp xếp phần còn lại.</span></div>' + protectedSummary + '<div class="change-summary"><h3>Thay đổi dự kiến</h3>' + changes.map((change) => '<div class="change-row"><span class="change-icon" aria-hidden="true">' + (change.kind === 'removed' ? '!' : change.kind === 'moved' ? '↗' : change.kind === 'time' ? '◷' : '✓') + '</span><span>' + escapeHtml(replanChangeText(change)) + '</span></div>').join('') + '</div><div class="preview-budget"><span>Ngân sách dự kiến sau điều chỉnh</span><strong>' + money(state.replanPreview.budget?.total) + '</strong><small>' + money(state.replanPreview.budget?.perPerson) + ' mỗi người</small></div><div class="preview-itinerary"><h3>Lịch trình xem trước</h3>' + (state.replanPreview.days || []).map((day, index) => readonlyDay(day, index, protectedIds)).join('') + '</div><div class="preview-actions"><button class="button button-ghost" type="button" data-action="cancel-replan">Giữ lịch trình hiện tại</button><button class="button button-primary" type="button" data-action="apply-replan">Áp dụng lịch trình mới</button></div></div>';
   }
-  $('#modal-root').innerHTML = '<div class="modal-backdrop replan-backdrop"><section class="modal replan-modal" role="dialog" aria-modal="true" aria-labelledby="replan-title"><button class="modal-close" type="button" data-action="close-replan" aria-label="Đóng cửa sổ">×</button><div class="kicker">ĐIỀU CHỈNH LỊCH TRÌNH</div><h2 id="replan-title">Có thay đổi trong chuyến đi?</h2><p>' + (state.replanPreview ? 'Xem lại đề xuất trước khi áp dụng vào lịch trình hiện tại.' : 'Cho PinkTrip biết điều gì xảy ra. Phương án sẽ chỉ thay đổi phần còn lại.') + '</p>' + body + '</section></div>';
+  $('#modal-root').innerHTML = '<div class="modal-backdrop replan-backdrop"><section class="modal replan-modal" role="dialog" aria-modal="true" aria-labelledby="replan-title"><button class="modal-close" type="button" data-action="close-replan" aria-label="Đóng cửa sổ">×</button><div class="kicker">ĐIỀU CHỈNH LỊCH TRÌNH</div><h2 id="replan-title">Có thay đổi trong chuyến đi?</h2><p>' + (state.replanPreview ? 'Xem lại đề xuất trước khi áp dụng vào lịch trình hiện tại.' : 'Cho PinkTrip biết điều gì xảy ra. Phương án sẽ chỉ thay đổi phần còn lại.') + '</p>' + body + '</section></div>' + renderReplanPicker();
   setOverlayState(true);
+  const nextModal = $('#modal-root .replan-modal');
+  if (nextModal) {
+    nextModal.scrollTop = modalScrollTop;
+    requestAnimationFrame(() => { if (nextModal.isConnected) nextModal.scrollTop = modalScrollTop; });
+  }
+  const baseModal = $('#modal-root .replan-backdrop');
+  if (state.replanPicker) {
+    baseModal?.setAttribute('aria-hidden', 'true');
+    if (baseModal) baseModal.inert = true;
+    requestAnimationFrame(positionReplanPicker);
+  }
+}
+
+function replanPickerTrigger(field = state.replanPicker?.field) {
+  return field ? document.querySelector('[data-replan-picker-field="' + field + '"]') : null;
+}
+
+function positionReplanPicker() {
+  if (!state.replanPicker) return;
+  const picker = $('#replan-picker-dialog');
+  const trigger = replanPickerTrigger();
+  if (!picker || !trigger || window.matchMedia('(max-width: 767px)').matches) return;
+  const triggerRect = trigger.getBoundingClientRect();
+  const viewportPadding = 16;
+  const width = Math.min(Math.max(triggerRect.width, 300), Math.min(460, window.innerWidth - viewportPadding * 2));
+  const left = Math.min(Math.max(viewportPadding, triggerRect.left), window.innerWidth - width - viewportPadding);
+  const height = picker.getBoundingClientRect().height;
+  const below = triggerRect.bottom + 8;
+  const maxTop = Math.max(viewportPadding, window.innerHeight - height - viewportPadding);
+  const preferredTop = below + height <= window.innerHeight - viewportPadding ? below : triggerRect.top - height - 8;
+  const top = Math.min(Math.max(viewportPadding, preferredTop), maxTop);
+  picker.style.setProperty('--picker-left', left + 'px');
+  picker.style.setProperty('--picker-top', top + 'px');
+  picker.style.setProperty('--picker-width', width + 'px');
+}
+
+function openReplanPicker(field, trigger) {
+  if (!state.replanOpen || !replanSelectOptions(field).length) return;
+  state.replanPicker = { field, triggerId: trigger.id, modalScrollTop: document.querySelector('.replan-modal')?.scrollTop || 0 };
+  renderReplanModal();
+  requestAnimationFrame(() => {
+    const modal = document.querySelector('.replan-modal');
+    if (modal) modal.scrollTop = state.replanPicker?.modalScrollTop || 0;
+    const selected = $('#replan-picker-list-' + field + ' [aria-selected="true"]') || $('#replan-picker-list-' + field + ' [role="option"]');
+    selected?.focus();
+    requestAnimationFrame(() => { if (modal && modal.isConnected) modal.scrollTop = state.replanPicker?.modalScrollTop || 0; });
+  });
+}
+
+function closeReplanPicker(restoreFocus = true) {
+  if (!state.replanPicker) return;
+  const field = state.replanPicker.field;
+  const modalScrollTop = state.replanPicker.modalScrollTop || 0;
+  state.replanPicker = null;
+  renderReplanModal();
+  if (restoreFocus) requestAnimationFrame(() => {
+    const modal = document.querySelector('.replan-modal');
+    if (modal) modal.scrollTop = modalScrollTop;
+    replanPickerTrigger(field)?.focus({ preventScroll: true });
+    requestAnimationFrame(() => { if (modal && modal.isConnected) modal.scrollTop = modalScrollTop; });
+  });
+}
+
+function selectReplanOption(field, value) {
+  if (!state.replanDraft || !replanSelectOptions(field).some((option) => String(option.value) === String(value))) return;
+  const modalScrollTop = state.replanPicker?.modalScrollTop || 0;
+  state.replanDraft[field] = field === 'dayIndex' ? Number(value) : value;
+  state.replanPicker = null;
+  renderReplanModal();
+  requestAnimationFrame(() => {
+    const modal = document.querySelector('.replan-modal');
+    if (modal) modal.scrollTop = modalScrollTop;
+    replanPickerTrigger(field)?.focus({ preventScroll: true });
+    requestAnimationFrame(() => { if (modal && modal.isConnected) modal.scrollTop = modalScrollTop; });
+  });
 }
 
 function openReplan() {
   lastModalTrigger = document.activeElement;
   state.replanOpen = true;
+  state.replanPicker = null;
   state.replanPreview = null;
   state.replanDraft = defaultReplanDraft();
   renderReplanModal();
@@ -1618,6 +1728,7 @@ function openReplan() {
 
 function closeReplan(restoreFocus = true) {
   state.replanOpen = false;
+  state.replanPicker = null;
   state.replanPreview = null;
   state.replanDraft = null;
   state.replanLoading = false;
@@ -1818,6 +1929,9 @@ async function handleAction(target) {
     toast('Đã đăng xuất');
     return navigate('/', { replace: true });
   }
+  if (action === 'open-replan-picker') return openReplanPicker(target.dataset.replanPickerField, target);
+  if (action === 'close-replan-picker') return closeReplanPicker();
+  if (action === 'select-replan-option') return selectReplanOption(target.dataset.replanPickerField, target.dataset.replanPickerValue);
   if (action === 'open-replan') return openReplan();
   if (action === 'move-item') {
     const day = Number(target.dataset.day);
@@ -1852,6 +1966,7 @@ async function handleAction(target) {
 
 document.addEventListener('click', async (event) => {
   if (state.datePickerOpen && !event.target.closest('.date-range-field')) closeDatePicker();
+  if (state.replanPicker && event.target.closest('#replan-picker-dialog') && !event.target.closest('[data-action]')) return;
   const link = event.target.closest('[data-route]');
   if (link) {
     event.preventDefault();
@@ -2140,6 +2255,7 @@ document.addEventListener('keydown', (event) => {
     if (state.datePickerOpen) closeDatePicker(true);
     else if (state.confirmDialog) closeConfirmDialog();
     else if (state.resetConfirmOpen) closeResetConfirmation();
+    else if (state.replanOpen && state.replanPicker) closeReplanPicker();
     else if (state.replanOpen) closeReplan();
     else if (state.reviewModalOpen) closeReviewModal();
     else if (state.reviewDetail) closePlaceReviews();
@@ -2148,6 +2264,19 @@ document.addEventListener('keydown', (event) => {
   if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[role="button"][data-action]')) {
     event.preventDefault();
     event.target.click();
+  }
+  if (event.target.matches('[role="option"][data-action="select-replan-option"]')) {
+    const options = [...document.querySelectorAll('#' + event.target.closest('[role="listbox"]')?.id + ' [role="option"]')];
+    const index = options.indexOf(event.target);
+    if (['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'].includes(event.key) && options.length) {
+      event.preventDefault();
+      const direction = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : Math.min(options.length - 1, Math.max(0, index + (event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1)));
+      options[direction]?.focus();
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      event.target.click();
+    }
   }
   if (event.target.matches('[data-action="review-star"][role="radio"]') && ['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
     event.preventDefault();
@@ -2165,7 +2294,8 @@ document.addEventListener('keydown', (event) => {
     if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   }
   if (event.key === 'Tab' && $('#modal-root').children.length) {
-    const focusable = [...$('#modal-root').querySelectorAll('button:not([disabled]),input,select,textarea,a[href]')];
+    const scope = state.replanPicker ? $('#replan-picker-dialog') : $('#modal-root');
+    const focusable = [...(scope?.querySelectorAll('button:not([disabled]),input,select,textarea,a[href]') || [])];
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
     if (first && event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
@@ -2175,6 +2305,7 @@ document.addEventListener('keydown', (event) => {
 
 window.addEventListener('popstate', () => applyRoute({ scroll: false }));
 window.addEventListener('scroll', scheduleItineraryScrollSync, { passive: true });
+window.addEventListener('resize', () => { if (state.replanPicker) positionReplanPicker(); });
 
 async function boot() {
   try {
