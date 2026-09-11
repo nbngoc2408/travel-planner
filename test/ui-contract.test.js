@@ -99,6 +99,20 @@ test('replan selectors use an accessible responsive picker instead of browser po
   assert.match(styles, /\.replan-modal\{overflow-anchor:none\}/);
 });
 
+test('mobile day-move control uses an accessible picker and stays touch-sized', () => {
+  assert.match(app, /movePicker: null/);
+  assert.match(app, /function renderMoveDayPicker\(/);
+  assert.match(app, /data-action="open-move-day-picker"/);
+  assert.match(app, /data-action="select-move-day-option"/);
+  assert.match(app, /role="listbox" aria-label="Ngày đích"/);
+  assert.doesNotMatch(app, /<select class="move-select"/);
+  assert.match(app, /data-short-label="N' \+ \(dayIndex \+ 1\) \+ '"/);
+  assert.match(styles, /\.move-select\{min-width:0\}/);
+  assert.match(styles, /\.move-select-trigger\{display:flex;align-items:center;justify-content:space-between/);
+  assert.match(styles, /\.timeline-controls \.icon-button\{flex:0 0 44px\}/);
+  assert.match(styles, /@media \(min-width:768px\) and \(max-width:1023px\)\{\s*\.editable-item \.timeline-controls\{grid-column:1\/-1;grid-row:2/);
+});
+
 test('landing markup keeps its primary actions balanced and localized', () => {
   assert.equal((index.match(/<button\b/g) || []).length, (index.match(/<\/button>/g) || []).length);
   assert.match(index, /class="skip-link" href="#top"/);

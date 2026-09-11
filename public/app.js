@@ -35,6 +35,7 @@ const state = {
   replanOpen: false,
   replanDraft: null,
   replanPicker: null,
+  movePicker: null,
   replanPreview: null,
   resetConfirmOpen: false,
   inspirationResolution: null,
@@ -1041,14 +1042,97 @@ function updateItemField(item, field, value) {
   if (field === 'startTime' || field === 'durationMinutes') item.endTime = minutesToTime(timeToMinutes(item.startTime) + (Number(item.durationMinutes) || 120));
 }
 
+function movePickerTrigger(picker = state.movePicker) {
+  if (!picker) return null;
+  return document.querySelector('.move-select[data-day="' + picker.day + '"][data-index="' + picker.index + '"]');
+}
+
+function renderMoveDayPicker() {
+  const picker = state.movePicker;
+  const item = picker && state.generated?.itinerary?.[picker.day]?.items?.[picker.index];
+  if (!picker || !item) {
+    state.movePicker = null;
+    if ($('#modal-root .move-day-picker-backdrop')) {
+      $('#modal-root').innerHTML = '';
+      setOverlayState(false);
+    }
+    return;
+  }
+  movePickerTrigger(picker)?.setAttribute('aria-expanded', 'true');
+  const options = (state.generated.itinerary || []).map((day, index) => {
+    const selected = index === picker.day;
+    return '<button class="replan-picker-option" type="button" role="option" aria-selected="' + selected + '" data-action="select-move-day-option" data-move-day-value="' + index + '"><span class="replan-picker-check" aria-hidden="true">' + (selected ? '✓' : '') + '</span><span class="replan-picker-copy"><strong>Ngày ' + (index + 1) + '</strong><small>' + escapeHtml(formatDate(day.date)) + '</small></span></button>';
+  }).join('');
+  $('#modal-root').innerHTML = '<div class="replan-picker-backdrop move-day-picker-backdrop" data-action="close-move-day-picker"><section id="move-day-picker-dialog" class="replan-picker-dialog move-day-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="move-day-picker-title"><div class="replan-picker-grabber" aria-hidden="true"></div><div class="replan-picker-header"><div><span class="kicker">DI CHUYỂN LỊCH TRÌNH</span><h2 id="move-day-picker-title">Chọn ngày đích</h2><p class="move-day-picker-item">' + escapeHtml(item.title) + '</p></div><button class="icon-button" type="button" data-action="close-move-day-picker" aria-label="Đóng danh sách ngày">×</button></div><div id="move-day-picker-list" class="replan-picker-list" role="listbox" aria-label="Ngày đích">' + options + '</div></section></div>';
+  setOverlayState(true);
+  requestAnimationFrame(() => {
+    const selected = $('#move-day-picker-list [aria-selected="true"]') || $('#move-day-picker-list [role="option"]');
+    selected?.focus();
+    positionMoveDayPicker();
+  });
+}
+
+function positionMoveDayPicker() {
+  if (!state.movePicker || window.matchMedia('(max-width: 767px)').matches) return;
+  const picker = $('#move-day-picker-dialog');
+  const trigger = movePickerTrigger();
+  if (!picker || !trigger) return;
+  const triggerRect = trigger.getBoundingClientRect();
+  const viewportPadding = 16;
+  const width = Math.min(Math.max(triggerRect.width, 300), Math.min(460, window.innerWidth - viewportPadding * 2));
+  const left = Math.min(Math.max(viewportPadding, triggerRect.left), window.innerWidth - width - viewportPadding);
+  const height = picker.getBoundingClientRect().height;
+  const below = triggerRect.bottom + 8;
+  const maxTop = Math.max(viewportPadding, window.innerHeight - height - viewportPadding);
+  const preferredTop = below + height <= window.innerHeight - viewportPadding ? below : triggerRect.top - height - 8;
+  const top = Math.min(Math.max(viewportPadding, preferredTop), maxTop);
+  picker.style.setProperty('--picker-left', left + 'px');
+  picker.style.setProperty('--picker-top', top + 'px');
+  picker.style.setProperty('--picker-width', width + 'px');
+}
+
+function openMoveDayPicker(trigger) {
+  if (!state.generated?.itinerary || state.itineraryBusy) return;
+  const day = Number(trigger.dataset.day);
+  const index = Number(trigger.dataset.index);
+  if (!state.generated.itinerary[day]?.items?.[index]) return;
+  state.movePicker = { day, index };
+  renderMoveDayPicker();
+}
+
+function closeMoveDayPicker(restoreFocus = true) {
+  const picker = state.movePicker;
+  if (!picker) return;
+  movePickerTrigger(picker)?.setAttribute('aria-expanded', 'false');
+  state.movePicker = null;
+  if ($('#modal-root .move-day-picker-backdrop')) $('#modal-root').innerHTML = '';
+  if (!state.replanOpen && !state.resetConfirmOpen && !state.reviewModalOpen && !state.reviewDetail && !state.confirmDialog) setOverlayState(false);
+  if (restoreFocus) requestAnimationFrame(() => movePickerTrigger(picker)?.focus({ preventScroll: true }));
+}
+
+async function selectMoveDayOption(value) {
+  const picker = state.movePicker;
+  const toDay = Number(value);
+  if (!picker || !Number.isInteger(toDay) || !state.generated?.itinerary?.[toDay]) return;
+  const { day: fromDay, index } = picker;
+  movePickerTrigger(picker)?.setAttribute('aria-expanded', 'false');
+  state.movePicker = null;
+  if ($('#modal-root .move-day-picker-backdrop')) $('#modal-root').innerHTML = '';
+  setOverlayState(false);
+  if (fromDay === toDay) {
+    requestAnimationFrame(() => movePickerTrigger({ day: fromDay, index })?.focus({ preventScroll: true }));
+    return;
+  }
+  await moveItem(fromDay, index, toDay);
+}
+
 function editorDay(day, dayIndex) {
   const summary = summarizeDay(day);
   const items = summary.items;
   const compact = state.itineraryView === 'compact';
   const itemHtml = items.map((item, index) => {
     if (compact) return '<div class="timeline-item compact-item' + (index < items.length - 1 ? ' has-next' : '') + '">' + timelineTime(item) + '<div class="timeline-rail" aria-hidden="true"><span></span></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(item.areaLabel || categoryLabels[item.category] || 'Điểm dừng') + ' · ' + item.durationMinutes + ' phút</small></div>' + timelineGap(item, items[index + 1]) + '</div>';
-    const dayOptions = (state.generated?.itinerary || []).map((entry, targetIndex) => '<option value="' + targetIndex + '" ' + (targetIndex === dayIndex ? 'selected' : '') + '>Ngày ' + (targetIndex + 1) + '</option>').join('');
-    return '<div class="timeline-item editable-item' + (index < items.length - 1 ? ' has-next' : '') + '" data-day="' + dayIndex + '" data-index="' + index + '">' + timelineTime(item, { editable: true, dayIndex }) + '<div class="timeline-rail" aria-hidden="true"><span></span></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + money(item.estimatedCost) + '/người</small><label class="duration-control">Thời lượng <input class="duration-input" type="number" min="30" step="15" data-item-field="durationMinutes" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + item.durationMinutes + '" aria-label="Thời lượng ' + escapeHtml(item.title) + '"> phút</label></div><div class="timeline-controls"><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="up" aria-label="Đưa ' + escapeHtml(item.title) + ' lên">↑</button><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="down" aria-label="Đưa ' + escapeHtml(item.title) + ' xuống">↓</button><select class="move-select" data-action="move-item-to-day" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Di chuyển ' + escapeHtml(item.title) + ' sang ngày khác"><option value="">Di chuyển đến…</option>' + dayOptions + '</select><button class="icon-button" type="button" data-action="remove-item" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Xóa ' + escapeHtml(item.title) + '">×</button></div>' + timelineGap(item, items[index + 1]) + '</div>';
+    return '<div class="timeline-item editable-item' + (index < items.length - 1 ? ' has-next' : '') + '" data-day="' + dayIndex + '" data-index="' + index + '">' + timelineTime(item, { editable: true, dayIndex }) + '<div class="timeline-rail" aria-hidden="true"><span></span></div><div class="timeline-item-copy"><strong>' + escapeHtml(item.title) + '</strong><small>' + escapeHtml(categoryLabels[item.category] || item.category || 'Điểm dừng') + (item.areaLabel ? ' · ' + escapeHtml(item.areaLabel) : '') + ' · ' + money(item.estimatedCost) + '/người</small><label class="duration-control">Thời lượng <input class="duration-input" type="number" min="30" step="15" data-item-field="durationMinutes" data-day="' + dayIndex + '" data-item="' + item.id + '" value="' + item.durationMinutes + '" aria-label="Thời lượng ' + escapeHtml(item.title) + '"> phút</label></div><div class="timeline-controls"><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="up" aria-label="Đưa ' + escapeHtml(item.title) + ' lên">↑</button><button class="icon-button" type="button" data-action="move-item" data-day="' + dayIndex + '" data-index="' + index + '" data-direction="down" aria-label="Đưa ' + escapeHtml(item.title) + ' xuống">↓</button><button class="move-select move-select-trigger" type="button" data-action="open-move-day-picker" data-day="' + dayIndex + '" data-index="' + index + '" data-short-label="N' + (dayIndex + 1) + '" aria-haspopup="listbox" aria-expanded="false" aria-controls="move-day-picker-list" aria-label="Di chuyển ' + escapeHtml(item.title) + ' sang ngày khác"><span>Ngày ' + (dayIndex + 1) + '</span><span aria-hidden="true">⌄</span></button><button class="icon-button" type="button" data-action="remove-item" data-day="' + dayIndex + '" data-index="' + index + '" aria-label="Xóa ' + escapeHtml(item.title) + '">×</button></div>' + timelineGap(item, items[index + 1]) + '</div>';
   }).join('');
   return '<section class="timeline-day editable-day' + (compact ? ' is-compact' : '') + '" id="editor-day-' + dayIndex + '" data-itinerary-day="' + dayIndex + '" data-drop-day="' + dayIndex + '"><h4>NGÀY ' + (dayIndex + 1) + ' · ' + formatDate(day.date) + '</h4>' + renderDaySummary(summary) + (itemHtml || '<p class="empty-day-message">Chuyển một hoạt động từ ngày khác để bắt đầu.</p>') + (compact && items.length ? '<p class="compact-day-hint">Chuyển sang Chi tiết để đổi giờ, thời lượng hoặc thứ tự.</p>' : '') + '</section>';
 }
@@ -1123,6 +1207,7 @@ function render() {
   if (state.route.view === 'detail') renderTripDetail();
   if (state.route.view === 'reviews') renderReviewPage();
   if (state.replanOpen) renderReplanModal();
+  if (state.movePicker) renderMoveDayPicker();
   if (state.resetConfirmOpen) renderResetConfirmation();
   if (state.reviewModalOpen) renderReviewModal();
   if (state.reviewDetail) renderPlaceReviewModal();
@@ -1846,6 +1931,9 @@ async function handleAction(target) {
   if (action === 'apply-replan') return applyReplan();
   if (action === 'jump-itinerary-day') return jumpToItineraryDay(target.dataset.workspace, target.dataset.dayIndex);
   if (action === 'jump-itinerary-overview') return jumpToItineraryOverview(target.dataset.workspace);
+  if (action === 'open-move-day-picker') return openMoveDayPicker(target);
+  if (action === 'close-move-day-picker') return closeMoveDayPicker();
+  if (action === 'select-move-day-option') return selectMoveDayOption(target.dataset.moveDayValue);
   if (action === 'set-itinerary-view') {
     state.itineraryView = target.dataset.view === 'compact' ? 'compact' : 'detailed';
     return renderPlanner();
@@ -2007,6 +2095,7 @@ async function handleAction(target) {
 
 document.addEventListener('click', async (event) => {
   if (state.datePickerOpen && !event.target.closest('.date-range-field')) closeDatePicker();
+  if (state.movePicker && event.target.closest('#move-day-picker-dialog') && !event.target.closest('[data-action]')) return;
   if (state.replanPicker && event.target.closest('#replan-picker-dialog') && !event.target.closest('[data-action]')) return;
   const link = event.target.closest('[data-route]');
   if (link) {
@@ -2016,7 +2105,7 @@ document.addEventListener('click', async (event) => {
     return;
   }
   const target = event.target.closest('[data-action]');
-  if (!target || target.tagName === 'SELECT') return;
+  if (!target) return;
   if (target.dataset.action === 'skip-to-content') event.preventDefault();
   await handleAction(target);
   // Pointer/touch activation should not leave a stale focus ring on the day
@@ -2298,6 +2387,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     if ($('#mobile-nav').classList.contains('is-open')) setMenu(false);
     if (state.datePickerOpen) closeDatePicker(true);
+    else if (state.movePicker) closeMoveDayPicker();
     else if (state.confirmDialog) closeConfirmDialog();
     else if (state.resetConfirmOpen) closeResetConfirmation();
     else if (state.replanOpen && state.replanPicker) closeReplanPicker();
@@ -2312,6 +2402,19 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.target.matches('[role="option"][data-action="select-replan-option"]')) {
     const options = [...document.querySelectorAll('#' + event.target.closest('[role="listbox"]')?.id + ' [role="option"]')];
+    const index = options.indexOf(event.target);
+    if (['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'].includes(event.key) && options.length) {
+      event.preventDefault();
+      const direction = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : Math.min(options.length - 1, Math.max(0, index + (event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1)));
+      options[direction]?.focus();
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      event.target.click();
+    }
+  }
+  if (event.target.matches('[role="option"][data-action="select-move-day-option"]')) {
+    const options = [...document.querySelectorAll('#move-day-picker-list [role="option"]')];
     const index = options.indexOf(event.target);
     if (['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'].includes(event.key) && options.length) {
       event.preventDefault();
@@ -2339,7 +2442,7 @@ document.addEventListener('keydown', (event) => {
     if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   }
   if (event.key === 'Tab' && $('#modal-root').children.length) {
-    const scope = state.replanPicker ? $('#replan-picker-dialog') : $('#modal-root');
+    const scope = state.replanPicker ? $('#replan-picker-dialog') : state.movePicker ? $('#move-day-picker-dialog') : $('#modal-root');
     const focusable = [...(scope?.querySelectorAll('button:not([disabled]),input,select,textarea,a[href]') || [])];
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -2352,6 +2455,7 @@ window.addEventListener('popstate', () => applyRoute({ scroll: false }));
 window.addEventListener('scroll', scheduleItineraryScrollSync, { passive: true });
 window.addEventListener('scrollend', resumeItineraryScrollSync, { passive: true });
 window.addEventListener('resize', () => { if (state.replanPicker) positionReplanPicker(); });
+window.addEventListener('resize', () => { if (state.movePicker) positionMoveDayPicker(); });
 
 async function boot() {
   try {

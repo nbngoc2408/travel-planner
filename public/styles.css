@@ -303,6 +303,26 @@ body.modal-open{overflow:hidden}
   .hero-art{height:clamp(410px,96vw,470px);min-height:410px}
 }
 
+/* Keep the day-move field usable beside the three 44px touch targets. */
+.move-select{min-width:0}
+.move-select-trigger{display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left;cursor:pointer}
+.move-select-trigger>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.move-select-trigger>span:last-child{flex:0 0 auto;color:var(--rose-dark);font-size:18px;line-height:1;transform:translateY(-1px)}
+.move-day-picker-item{margin:4px 0 0;color:var(--muted);font-size:14px;line-height:1.4}
+@media (max-width:767px){
+  .timeline-controls{gap:6px}
+  .timeline-controls .icon-button{flex:0 0 44px}
+}
+@media (min-width:768px) and (max-width:1023px){
+  .editable-item .timeline-controls{grid-column:1/-1;grid-row:2;justify-content:flex-start}
+}
+@media (max-width:359px){
+  .move-select-trigger{gap:3px;padding-inline:8px}
+  .move-select-trigger>span:first-child{display:none}
+  .move-select-trigger::before{content:attr(data-short-label);font-weight:800}
+  .move-select-trigger>span:last-child{font-size:15px}
+}
+
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}
